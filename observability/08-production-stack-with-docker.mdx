@@ -1,0 +1,163 @@
+---
+title: Production Stack with Docker
+order: 8
+description: Wire the full observability stack — instrumented Node app, Prometheus, Grafana, Alertmanager, and Jaeger — with Docker Compose, plus production best practices.
+---
+
+# The Full Observability Stack with Docker
+
+## What you'll learn
+- Wiring app + Prometheus + Grafana (+ Alertmanager + Jaeger) with Compose
+- Provisioning everything as code
+- Production concerns: retention, cardinality, security, cost
+- How the pillars come together in an incident
+
+This assembles everything into the runnable [`examples/`](./examples) stack — the
+**operate** layer on top of the [Docker](../docker/README.md), [Nginx](../nginx/README.md),
+and [CI/CD](../ci-cd/README.md) courses.
+
+---
+
+## The stack
+```
+                     ┌────────────┐  scrapes /metrics   ┌──────────────┐
+   traffic ─▶ App ──▶│ /metrics   │◀────────────────────│ Prometheus   │──┐
+            (Node)   │ OTLP traces│──┐                   │ (+ rules)    │  │ alerts
+                     └────────────┘  │                   └──────┬───────┘  ▼
+                                     │ traces                   │      ┌──────────────┐
+                                     ▼                          │query │ Alertmanager │─▶ Slack/Pager
+                              ┌────────────┐                    ▼      └──────────────┘
+                              │  Jaeger    │            ┌──────────────┐
+                              └────────────┘            │   Grafana    │ dashboards
+                                                        └──────────────┘
+```
+
+## docker-compose.yml (core)
+```yaml
+services:
+  app:
+    build: ./app
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"            # exposes /metrics and the API
+    depends_on: [redis, jaeger]
+
+  redis:
+    image: redis:7-alpine
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro   # data source + dashboards as code
+    ports:
+      - "3001:3000"            # Grafana UI on host :3001 (app uses :3000)
+    depends_on: [prometheus]
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"          # Jaeger UI
+      - "4318:4318"            # OTLP HTTP receiver
+```
+
+Bring it up and explore:
+```bash
+docker compose up -d
+# generate some traffic
+for i in $(seq 1 200); do curl -s localhost:3000/api/ >/dev/null; done
+
+# App metrics:   curl localhost:3000/metrics
+# Prometheus:    http://localhost:9090      (Status → Targets shows "app" UP)
+# Grafana:       http://localhost:3001      (admin/admin; dashboard auto-provisioned)
+# Jaeger:        http://localhost:16686     (search traces)
+```
+
+Everything Prometheus, Grafana, and the app need is provisioned from files in the repo —
+no manual clicking. That's the whole stack as code.
+
+---
+
+## Production concerns
+
+**Retention & storage.** Prometheus keeps data locally (default ~15 days). For long-term
+history, remote-write to **Thanos**, **Mimir**, or a managed backend. Size disk for your
+ingestion rate.
+```yaml
+# prometheus run flag
+--storage.tsdb.retention.time=30d
+```
+
+**Cardinality is the #1 cost driver.** Every unique label combination is a series. A single
+high-cardinality label (user ID, raw URL, request ID) can multiply series into the millions
+and OOM Prometheus. Audit labels; keep them bounded (Lesson 03).
+
+**Security.**
+- Don't expose `/metrics`, Prometheus, or Grafana to the public internet — keep them on a
+  private network / behind auth (front Grafana with Nginx + TLS from the
+  [Nginx course](../nginx/06-https-and-tls.mdx)).
+- Change Grafana's default admin password; use real auth (OAuth/LDAP) in prod.
+- Treat dashboards/alert configs as code in git, reviewed via CI/CD.
+
+**Cost.** Telemetry isn't free — metrics cardinality, log volume, and trace sampling all
+cost money/resources. Sample traces, set log retention, and drop metrics nobody queries.
+
+**Health & self-monitoring.** Monitor the monitors: alert on `up == 0` for Prometheus
+targets, Prometheus running low on disk, and Alertmanager being reachable. A blind spot in
+your observability is a silent outage.
+
+---
+
+## The pillars in an incident (putting it together)
+A real debugging flow using all three:
+1. **Alert** fires: *p95 latency > 1s* (a **metric**, from Prometheus → Alertmanager → Slack).
+2. Open the **Grafana** RED dashboard — latency spiked on `/api/checkout` 10 min ago,
+   errors normal. So it's *slow*, not *failing*.
+3. Jump to **Explore/logs** filtered to that window + route — find slow `payment` log lines
+   with a `traceId`.
+4. Open that **trace** in Jaeger — the `payment-api` span is taking 1.2s; the DB and Redis
+   spans are fine.
+5. Root cause: the payment provider is degraded. Mitigate (timeout/fallback), and the error
+   budget tells you how urgent it is.
+
+Metrics found it, the dashboard localized it, logs gave context, the trace pinpointed it.
+**That correlation is the payoff of observability.**
+
+---
+
+## Common pitfalls
+- ❌ Exposing Prometheus/Grafana/`/metrics` publicly.
+- ❌ Unbounded retention/cardinality → runaway cost and OOM.
+- ❌ Manually-configured dashboards/data sources lost on redeploy — provision as code.
+- ❌ Not monitoring the monitoring stack itself.
+
+## Best practices
+- ✅ Provision data sources, dashboards, and alert rules as code (in git, via CI/CD).
+- ✅ Keep `/metrics` and the tooling on a private network; secure Grafana.
+- ✅ Control cardinality, set retention, and sample traces to manage cost.
+- ✅ Self-monitor the stack; alert on dead targets and disk.
+- ✅ Practice the metric → log → trace drill before you need it.
+
+## Try it yourself
+1. Run the [`examples/`](./examples) stack; confirm Prometheus shows the app `UP`, Grafana
+   auto-loads the dashboard, and Jaeger receives traces.
+2. Add an endpoint that randomly returns 500s and is sometimes slow; watch the error-rate
+   and latency panels react, and trace a slow request in Jaeger.
+3. Wire the `HighErrorRate` alert (Lesson 06) and trigger it; confirm it appears in
+   Prometheus → Alerts.
+
+🎉 **You've completed the Observability course.** With the
+[Redis](../redis/README.md), [Docker](../docker/README.md), [Nginx](../nginx/README.md),
+and [CI/CD](../ci-cd/README.md) courses, you can now build, containerize, front, ship — and
+now **operate** — a production application with confidence.

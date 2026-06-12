@@ -1,0 +1,128 @@
+---
+title: Introduction
+order: 1
+description: What observability is, how it differs from monitoring, the three pillars (metrics, logs, traces), and the golden signals worth measuring.
+---
+
+# Introduction to Observability
+
+## What you'll learn
+- What "observability" actually means
+- How it differs from traditional monitoring
+- The **three pillars**: metrics, logs, traces
+- The **golden signals** / RED / USE methods worth measuring
+
+---
+
+## Monitoring vs observability
+- **Monitoring** answers questions you **already knew to ask**: "Is CPU above 80%?", "Is the
+  site up?" You predefine dashboards and alerts for known failure modes.
+- **Observability** is the property of being able to ask **new questions** about your system
+  from the outside, without shipping new code — to debug problems you *didn't* anticipate:
+  "Why are checkout requests from mobile users in Europe slow *today*?"
+
+You build observability by emitting rich **telemetry** (metrics, logs, traces) that you can
+slice and correlate after the fact. Monitoring is a subset of what observability enables.
+
+---
+
+## Why it matters
+Once an app is in production (containerized, behind Nginx, shipped by CI/CD), things *will*
+go wrong: latency spikes, error bursts, memory leaks, a slow dependency. Without telemetry
+you're guessing. With it you can:
+- **Detect** problems fast (alerts on real symptoms).
+- **Diagnose** root cause (drill from a metric to logs to a trace).
+- **Understand** capacity & trends (do we need to scale?).
+- **Verify** that a deploy actually improved things.
+
+---
+
+## The three pillars
+
+### 1. Metrics — numbers over time
+Cheap, aggregatable measurements sampled regularly: request rate, error count, latency,
+memory usage, queue depth. Great for **dashboards and alerts** and spotting *that*
+something is wrong.
+```
+http_requests_total{status="200"} = 48213     # a counter, scraped every 15s
+```
+
+### 2. Logs — discrete events with context
+A timestamped record of something that happened, ideally **structured** (JSON) so it's
+queryable. Great for understanding *what exactly* happened.
+```json
+{"level":"error","ts":"2026-06-12T10:00:00Z","msg":"payment failed","orderId":"A123","reqId":"r-9f"}
+```
+
+### 3. Traces — one request across services
+A **trace** follows a single request as it flows through services, broken into timed
+**spans**. Great for finding *where the time went* in a distributed system.
+```
+trace ─ request /checkout (320ms)
+        ├─ auth-service     (15ms)
+        ├─ db query         (40ms)
+        └─ payment API call (250ms)   ← the slow part
+```
+
+**They work together:** a metric alert fires (latency up) → you query logs for errors in that
+window → you open a trace to see which span is slow. Correlating the three is the whole game.
+
+---
+
+## What to measure: golden signals
+Don't measure everything — measure what indicates user-facing health. Google's **Four
+Golden Signals**:
+| Signal | Meaning | Example metric |
+|--------|---------|----------------|
+| **Latency** | How long requests take | p95 request duration |
+| **Traffic** | How much demand | requests/sec |
+| **Errors** | Rate of failed requests | 5xx ratio |
+| **Saturation** | How "full" the system is | CPU, memory, queue depth |
+
+Two related shorthands you'll see:
+- **RED** (for request-driven services): **R**ate, **E**rrors, **D**uration.
+- **USE** (for resources): **U**tilization, **S**aturation, **E**rrors.
+
+This course instruments a Node app for RED, scrapes it with Prometheus, dashboards it in
+Grafana, alerts on SLOs, and traces requests with OpenTelemetry.
+
+---
+
+## The open-source stack you'll use
+| Tool | Pillar | Role |
+|------|--------|------|
+| `prom-client` | metrics | Expose Node metrics at `/metrics` |
+| `pino` | logs | Structured JSON logging |
+| OpenTelemetry | traces (+ metrics) | Vendor-neutral instrumentation |
+| **Prometheus** | metrics | Scrape, store, alert |
+| **Grafana** | all | Visualize & explore |
+| **Alertmanager** | metrics | Route alerts |
+| **Jaeger** / Tempo | traces | Store & view traces |
+| **Loki** | logs | Aggregate logs in Grafana |
+
+> These are the de-facto open standards. Managed equivalents (Datadog, New Relic, Honeycomb,
+> Grafana Cloud, CloudWatch) expose the same concepts — the pillars and signals transfer.
+
+---
+
+## Common pitfalls
+- ❌ Confusing "the server is up" with "users are having a good experience" — measure
+  user-facing symptoms (latency/errors), not just host CPU.
+- ❌ Logging everything with no structure → unsearchable noise and big bills.
+- ❌ Alerting on causes (high CPU) instead of symptoms (slow/failing requests).
+- ❌ Collecting telemetry no one ever looks at.
+
+## Best practices
+- ✅ Instrument for the **golden signals / RED** first; add detail later.
+- ✅ Make logs structured and correlatable (IDs that tie logs ↔ traces).
+- ✅ Alert on **symptoms** that affect users; keep alerts few and actionable.
+- ✅ Treat telemetry as part of the feature, not an afterthought.
+
+## Try it yourself
+1. For an app you run, list its RED metrics: what would "Rate", "Errors", and "Duration"
+   be, and where would you measure them?
+2. Pick one past incident you've seen. Which pillar would have caught it fastest — a metric,
+   a log, or a trace?
+3. Skim the [`examples/`](./examples) stack you'll build: app → Prometheus → Grafana.
+
+➡️ Next: [Structured Logging](./02-structured-logging.mdx)

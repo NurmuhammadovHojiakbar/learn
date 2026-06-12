@@ -1,0 +1,178 @@
+---
+title: Distributed Tracing
+order: 7
+description: Follow a request across services with OpenTelemetry — spans and traces, auto and manual instrumentation in Node, context propagation, and viewing traces in Jaeger.
+---
+
+# Distributed Tracing
+
+## What you'll learn
+- What traces and spans are
+- **OpenTelemetry** — the vendor-neutral standard
+- **Auto-instrumenting** a Node app, and adding manual spans
+- **Context propagation** across services
+- Viewing traces in **Jaeger**
+
+Metrics tell you *that* requests are slow. Logs tell you *what* happened. **Traces** tell you
+**where the time went** across services — the missing piece in a distributed system.
+
+---
+
+## Traces and spans
+- A **span** is a single timed operation: an HTTP handler, a DB query, an external call. It
+  has a name, start/end time, attributes (key/values), and a status.
+- A **trace** is a tree of spans for **one request**, linked by a shared **trace ID**. Each
+  span has a parent, forming the call hierarchy.
+
+```
+Trace: GET /checkout                       [■■■■■■■■■■■■■■■■■■] 320ms
+  ├─ middleware.auth                        [■■]                15ms
+  ├─ db.query SELECT cart                   [■■■■]              40ms
+  ├─ redis.GET pricing                      [■]                  3ms
+  └─ http POST payment-api                  [■■■■■■■■■■■■]      250ms  ← the bottleneck
+```
+One glance shows the payment call dominates — something metrics alone wouldn't pinpoint.
+
+---
+
+## OpenTelemetry (OTel)
+**OpenTelemetry** is the open, vendor-neutral standard for generating traces (and metrics
+and logs). You instrument once with OTel and can export to **any** backend — Jaeger, Tempo,
+Zipkin, Datadog, Honeycomb — without changing app code. It's the industry default; prefer it
+over vendor-specific SDKs.
+
+```bash
+npm install @opentelemetry/sdk-node \
+            @opentelemetry/auto-instrumentations-node \
+            @opentelemetry/exporter-trace-otlp-http
+```
+
+---
+
+## Auto-instrumentation (the fast path)
+OTel can automatically instrument popular libraries (HTTP, Express, `redis`, `pg`, etc.) — no
+manual spans needed to get started. Load it **before** your app code:
+
+```js
+// tracing.js — required at the very top, before anything else
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+
+const sdk = new NodeSDK({
+  serviceName: 'orders-api',
+  traceExporter: new OTLPTraceExporter({
+    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318/v1/traces',
+  }),
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+
+sdk.start();
+process.on('SIGTERM', () => sdk.shutdown());
+```
+```bash
+# Load it first via --import (or require), then your app:
+node --import ./tracing.js app.js
+```
+Now every incoming HTTP request, Express route, Redis command, and Postgres query
+automatically becomes a span — you get useful traces with zero changes to business logic.
+
+---
+
+## Manual spans for business logic
+Auto-instrumentation covers libraries; add manual spans around your own important
+operations:
+```js
+import { trace } from '@opentelemetry/api';
+const tracer = trace.getTracer('orders-api');
+
+async function processOrder(order) {
+  return tracer.startActiveSpan('processOrder', async (span) => {
+    try {
+      span.setAttribute('order.id', order.id);
+      span.setAttribute('order.total', order.total);
+      await chargeCard(order);          // nested library calls become child spans
+      span.setStatus({ code: 1 });       // OK
+    } catch (err) {
+      span.recordException(err);
+      span.setStatus({ code: 2, message: err.message });   // ERROR
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+```
+> Add attributes that help you debug (IDs, sizes, flags) — but **not** secrets/PII, same as
+> logging. High-cardinality is fine on spans (unlike metric labels): an `order.id` per span
+> is expected.
+
+---
+
+## Context propagation — across services
+For a trace to span **multiple services**, the trace context must travel with the request.
+OTel does this by injecting/extracting the **W3C `traceparent`** HTTP header automatically
+(the HTTP instrumentation handles it). So when service A calls service B, B's spans join
+A's trace — you see the whole request end-to-end.
+
+This is also how you **link traces to logs**: put the `trace_id` into your structured logs
+(Lesson 02) so a log line jumps straight to its trace.
+```js
+import { trace } from '@opentelemetry/api';
+const span = trace.getActiveSpan();
+req.log.info({ traceId: span?.spanContext().traceId, orderId }, 'processing order');
+```
+
+---
+
+## Viewing traces in Jaeger
+**Jaeger** is a popular open-source trace backend with a search UI. Run it (all-in-one):
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+- App exports traces to `http://jaeger:4318/v1/traces` (OTLP HTTP).
+- Open the UI at **http://localhost:16686**, pick your service, and search traces — filter by
+  duration to find the slow ones, then drill into the span waterfall.
+
+(Grafana **Tempo** is an alternative backend that integrates traces with your Grafana
+dashboards/logs.)
+
+---
+
+## Sampling — don't trace everything at scale
+Tracing every request is expensive at high volume. **Sampling** keeps a representative
+fraction:
+- **Head sampling** — decide at the start (e.g. keep 10%). Simple, cheap.
+- **Tail sampling** — decide after the request (e.g. keep all errors + slow ones). Smarter,
+  needs a collector.
+
+Start with a modest head sample in production; bias toward keeping errors and slow traces.
+
+---
+
+## Common pitfalls
+- ❌ Loading the tracing SDK *after* your app → auto-instrumentation misses libraries. Load
+  it first (`--import`).
+- ❌ Not propagating context → traces break at service boundaries (disconnected spans).
+- ❌ Putting secrets/PII in span attributes.
+- ❌ 100% sampling at high traffic → huge cost and storage.
+- ❌ Traces with no link to logs/metrics → you lose the correlation that makes them powerful.
+
+## Best practices
+- ✅ Use **OpenTelemetry** (vendor-neutral); auto-instrument first, add manual spans for
+  business logic.
+- ✅ Load tracing before app code; let OTel propagate W3C context.
+- ✅ Put `trace_id` in structured logs to link the pillars.
+- ✅ Sample in production; keep errors and slow traces.
+
+## Try it yourself
+1. Add `tracing.js` to the example app, run Jaeger, and send a few requests.
+2. Open Jaeger, find a trace, and inspect the span waterfall — note the Redis/DB spans you
+   got for free.
+3. Add a manual `processOrder` span with attributes and confirm it appears nested in the
+   trace.
+
+➡️ Next: [Production Stack with Docker](./08-production-stack-with-docker.mdx)

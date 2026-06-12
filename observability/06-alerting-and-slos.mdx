@@ -1,0 +1,163 @@
+---
+title: Alerting & SLOs
+order: 6
+description: Turn metrics into action — Prometheus alert rules, Alertmanager routing, alert-fatigue avoidance, and SLOs with error budgets.
+---
+
+# Alerting & SLOs
+
+## What you'll learn
+- Writing **Prometheus alert rules**
+- Routing and deduping with **Alertmanager**
+- Avoiding **alert fatigue** (alert on symptoms, not causes)
+- **SLOs, SLIs, and error budgets**
+
+Dashboards are pull (you look). **Alerts** are push (they find you) — so you don't have to
+stare at graphs to know something's wrong.
+
+---
+
+## Alert rules in Prometheus
+An alert rule is a PromQL expression that, when true for some duration, fires an alert:
+```yaml
+# alert.rules.yml
+groups:
+  - name: http-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total[5m]))
+          > 0.05
+        for: 5m                        # must stay true for 5m before firing (avoids flapping)
+        labels:
+          severity: critical
+        annotations:
+          summary: "High 5xx error rate ({{ $value | humanizePercentage }})"
+          description: "More than 5% of requests are failing for 5 minutes."
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 latency above 1s"
+
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} target is down"
+```
+Reference the file from `prometheus.yml` (`rule_files:`). Prometheus evaluates these every
+interval; firing alerts are sent to **Alertmanager**.
+
+- **`for:`** — the condition must hold this long before firing. Crucial for avoiding alerts
+  on momentary blips.
+- **`labels`** — used for routing (severity).
+- **`annotations`** — human-readable text (templated with `$value`, `$labels`).
+
+---
+
+## Alertmanager — routing, grouping, silencing
+Prometheus decides *what* is firing; **Alertmanager** decides *who gets told and how*. It
+**groups** related alerts, **deduplicates**, **silences**, and **routes** to receivers
+(Slack, PagerDuty, email, webhook).
+
+```yaml
+# alertmanager.yml
+route:
+  receiver: 'slack-default'
+  group_by: ['alertname', 'job']     # collapse related alerts into one notification
+  group_wait: 30s                    # wait to batch alerts that fire together
+  group_interval: 5m
+  repeat_interval: 4h                # re-notify if still firing
+  routes:
+    - matchers: [ 'severity = critical' ]
+      receiver: 'pagerduty'          # page for critical
+    - matchers: [ 'severity = warning' ]
+      receiver: 'slack-default'      # Slack for warnings
+
+receivers:
+  - name: 'slack-default'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#alerts'
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_KEY}'
+```
+**Grouping** is why you get *one* "service down" message instead of 50 — one per failing
+metric.
+
+---
+
+## Avoiding alert fatigue
+The fastest way to make alerts useless is too many of them. Rules of thumb:
+- **Alert on symptoms, not causes.** Page on "users see errors / requests are slow"
+  (user-facing), not "CPU is 90%" (which may be fine). High CPU that *doesn't* hurt users
+  isn't an emergency.
+- **Every page must be actionable.** If there's nothing to do, it shouldn't page.
+- **Use severities.** `critical` → page a human now; `warning` → Slack/ticket, look during
+  the day.
+- **Use `for:`** so transient spikes self-resolve without paging.
+- **Tune thresholds** from real data; review and delete noisy alerts.
+
+> If an alert fires and the responder's reaction is "ignore it," that alert is actively
+> harmful — it trains people to ignore alerts.
+
+---
+
+## SLIs, SLOs, and error budgets
+A principled way to decide *what* to alert on:
+- **SLI (Indicator)** — a metric of user-facing health, e.g. "% of requests served < 300ms
+  and non-5xx."
+- **SLO (Objective)** — the target for that SLI, e.g. "99.9% of requests succeed over 30
+  days."
+- **Error budget** — the allowed failure: 100% − SLO. 99.9% over 30 days ≈ **43 minutes** of
+  downtime budget per month.
+
+The error budget reframes reliability: you don't need *zero* errors, you need to stay within
+budget. If you're burning it fast, freeze risky deploys and fix reliability; if you have
+budget to spare, you can ship faster.
+
+**Burn-rate alerts** page when you're consuming the budget too quickly:
+```promql
+# Error ratio over a short window far exceeding the SLO threshold = fast burn
+sum(rate(http_requests_total{status=~"5.."}[5m]))
+  /
+sum(rate(http_requests_total[5m]))
+> (14.4 * 0.001)        # 14.4x burn of a 99.9% (0.1% budget) SLO
+```
+This pages on *meaningful* budget burn rather than every brief blip — the modern, low-noise
+approach to alerting.
+
+---
+
+## Common pitfalls
+- ❌ Alerting on causes (CPU, memory) that don't affect users → noise.
+- ❌ No `for:` duration → flapping alerts on momentary spikes.
+- ❌ No grouping → 50 notifications for one incident.
+- ❌ Alerts with no clear action → people learn to ignore all alerts.
+- ❌ Chasing 100% uptime instead of an SLO with an error budget.
+
+## Best practices
+- ✅ Alert on user-facing symptoms (errors, latency, availability).
+- ✅ Severity-based routing: page for critical, ticket/Slack for warning.
+- ✅ Use `for:` and Alertmanager grouping to cut noise.
+- ✅ Define SLOs + error budgets; use burn-rate alerts.
+- ✅ Review alert quality regularly; delete the noisy ones.
+
+## Try it yourself
+1. Add the `HighErrorRate` and `TargetDown` rules to Prometheus; check **Alerts** in the UI.
+2. Trigger errors in the example app (an endpoint that returns 500) and watch the alert go
+   `Pending` → `Firing` after `for:`.
+3. Write an SLO for the example app (e.g. 99.5% success over 7 days), compute its error
+   budget in minutes, and sketch a burn-rate alert.
+
+➡️ Next: [Distributed Tracing](./07-distributed-tracing.mdx)

@@ -1,0 +1,64 @@
+# Full observability stack (Lesson 08): instrumented app + Prometheus + Grafana + Jaeger.
+#   docker compose up -d
+#   generate traffic, then explore:
+#     App metrics : curl localhost:3000/metrics
+#     Prometheus  : http://localhost:9090   (Status -> Targets shows "app" UP)
+#     Grafana     : http://localhost:3001   (admin/admin; "Orders API — RED" auto-loaded)
+#     Jaeger      : http://localhost:16686  (search traces)
+
+services:
+  app:
+    build: ./app
+    environment:
+      REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      OTEL_SERVICE_NAME: orders-api
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"          # Grafana on host :3001 (app already uses :3000)
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"        # Jaeger UI
+      - "4318:4318"          # OTLP HTTP receiver
+    restart: unless-stopped

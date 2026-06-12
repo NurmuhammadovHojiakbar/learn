@@ -9,12 +9,11 @@ The courses are designed to **interlock** — you build a Node.js app, give it a
 containerize it with Docker, and ship it automatically with CI/CD.
 
 ```
-   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
-   │  Redis  │ ─▶ │ Docker  │ ─▶ │  Nginx  │ ─▶ │  CI/CD  │
-   │  cache  │    │ package │    │  front  │    │  ship   │
-   └─────────┘    └─────────┘    └─────────┘    └─────────┘
-   build the app   containerize   put a front    test & deploy
-                                  door on it
+   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌──────────────┐
+   │  Redis  │─▶ │ Docker  │─▶ │  Nginx  │─▶ │  CI/CD  │─▶ │ Observability│
+   │  cache  │   │ package │   │  front  │   │  ship   │   │   operate    │
+   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └──────────────┘
+   build the app  containerize  front door    test&deploy   metrics·logs·traces
 ```
 
 ---
@@ -50,6 +49,13 @@ deploys with rollbacks. **8 lessons + ready-to-use workflows.**
 
 > Start here once you have an app and image to automate.
 
+### 📊 [Observability](./observability/README.md) — operate what you shipped
+Know what your app is doing in production: structured logging (pino), metrics (Prometheus),
+dashboards (Grafana), alerting & SLOs, and distributed tracing (OpenTelemetry + Jaeger).
+**8 lessons + a runnable app → Prometheus → Grafana → Jaeger stack.**
+
+> Start here once your app is live and you need to monitor and debug it.
+
 ---
 
 ## Suggested learning paths
@@ -61,12 +67,15 @@ deploys with rollbacks. **8 lessons + ready-to-use workflows.**
 4. **CI/CD** 01–06 — automate lint/test/build and publish the image.
 5. **CI/CD** 07–08 + **Docker** 07–08 + **Nginx** 05–08 — deploy, load-balance, add TLS,
    harden, and operate it.
-6. Circle back to **Redis** 06–11 for pub/sub, scaling, and vector search as you need them.
+6. **Observability** 01–08 — instrument the running app with metrics, logs, traces, and
+   alerts so you can operate it.
+7. Circle back to **Redis** 06–11 for pub/sub, scaling, and vector search as you need them.
 
 **Just need caching?** Redis 01–05 + 10 (production patterns).
 **Just need to containerize?** Docker 01–06.
 **Just need a reverse proxy / HTTPS?** Nginx 01–04 + 06.
 **Just automating an existing app?** CI/CD 01–06.
+**Just need monitoring/alerts?** Observability 01–06.
 
 ---
 
@@ -92,3 +101,4 @@ deploys with rollbacks. **8 lessons + ready-to-use workflows.**
 | [Docker](./docker/README.md) | 8 | Node + Redis | Containerize and run multi-service apps |
 | [Nginx](./nginx/README.md) | 8 | Nginx + Node + Redis | Reverse-proxy, load-balance, and TLS your app |
 | [CI/CD](./ci-cd/README.md) | 8 | GitHub Actions | Auto-test, build images, and deploy safely |
+| [Observability](./observability/README.md) | 8 | Prometheus + Grafana + Jaeger | Monitor, dashboard, alert, and trace in prod |

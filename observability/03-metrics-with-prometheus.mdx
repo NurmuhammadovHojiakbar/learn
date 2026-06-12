@@ -1,0 +1,164 @@
+---
+title: Metrics with Prometheus
+order: 3
+description: Instrument a Node.js app with prom-client — the four metric types, labels, default process metrics, and exposing a /metrics endpoint.
+---
+
+# Metrics with Prometheus (Node.js)
+
+## What you'll learn
+- How Prometheus metrics work (the pull model)
+- The **four metric types** and when to use each
+- Instrumenting Node with **`prom-client`**
+- **Labels**, default process metrics, and a `/metrics` endpoint
+
+---
+
+## How Prometheus collects metrics: the pull model
+Your app doesn't push metrics anywhere. Instead it **exposes** a plain-text `/metrics`
+endpoint, and the Prometheus server **scrapes** (HTTP GETs) it on an interval (e.g. every
+15s). Each scrape is a snapshot of all current metric values.
+
+```
+   Node app  ──exposes──▶  GET /metrics   ◀──scrapes every 15s── Prometheus
+   (prom-client)            (text format)                         (stores time series)
+```
+The exposition format is just text:
+```
+# HELP http_requests_total Total HTTP requests
+# TYPE http_requests_total counter
+http_requests_total{method="GET",route="/api",status="200"} 1027
+```
+
+---
+
+## The four metric types
+| Type | Goes… | Use for | Example |
+|------|-------|---------|---------|
+| **Counter** | only up (resets on restart) | counts of events | requests, errors, jobs done |
+| **Gauge** | up and down | a current value | in-flight requests, memory, queue depth |
+| **Histogram** | buckets + sum + count | distributions (latency, size) | request duration, payload size |
+| **Summary** | client-side quantiles | distributions when you can't aggregate | (prefer histograms usually) |
+
+> **Counter vs Gauge:** "how many requests *have happened*" is a counter (ever-increasing);
+> "how many requests are *happening right now*" is a gauge. **Histograms** are how you get
+> latency percentiles — Prometheus computes p95 from the buckets (Lesson 04).
+
+---
+
+## Instrumenting Node with prom-client
+```bash
+npm install prom-client
+```
+```js
+import client from 'prom-client';
+
+// A registry holds your metrics
+const register = new client.Registry();
+register.setDefaultLabels({ app: 'orders-api' });
+
+// Collect built-in Node/process metrics (CPU, memory, event loop lag, GC...)
+client.collectDefaultMetrics({ register });
+
+// A counter: total HTTP requests, labeled by method/route/status
+const httpRequests = new client.Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'route', 'status'],
+  registers: [register],
+});
+
+// A histogram: request duration in seconds
+const httpDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'status'],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 0.5, 1, 2, 5],   // tune to your latencies
+  registers: [register],
+});
+
+// A gauge: requests currently in flight
+const inFlight = new client.Gauge({
+  name: 'http_requests_in_flight',
+  help: 'In-flight HTTP requests',
+  registers: [register],
+});
+```
+
+### Record metrics with middleware
+```js
+app.use((req, res, next) => {
+  inFlight.inc();
+  const end = httpDuration.startTimer();          // starts a timer
+  res.on('finish', () => {
+    const route = req.route?.path || req.path;     // use the route TEMPLATE, not the raw URL
+    const labels = { method: req.method, route, status: res.statusCode };
+    httpRequests.inc(labels);
+    end(labels);                                   // observes the duration
+    inFlight.dec();
+  });
+  next();
+});
+```
+
+### Expose the /metrics endpoint
+```js
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+```
+That's it — Prometheus can now scrape your app. (Wiring the scrape is Lesson 04.)
+
+---
+
+## Labels — powerful, but mind cardinality
+Labels let you slice a metric (by `route`, `status`, `method`). But **every unique label
+combination creates a new time series**, and high **cardinality** can overwhelm Prometheus.
+
+```js
+// ✅ good — bounded set of values
+httpRequests.inc({ route: '/api/orders/:id', status: 200 });
+
+// ❌ BAD — unbounded: a new series per user / per raw URL / per ID
+httpRequests.inc({ route: `/api/orders/${realOrderId}`, userId: 12345 });
+```
+**Rule:** use the **route template** (`/orders/:id`), never the interpolated path or
+user/order IDs, as labels. Keep label values to a small, finite set.
+
+---
+
+## What to instrument first (RED)
+Start with the request-driven golden signals:
+- **Rate** — `http_requests_total` (counter).
+- **Errors** — same counter, filtered by `status=~"5.."`.
+- **Duration** — `http_request_duration_seconds` (histogram).
+
+Plus the **default metrics** (CPU, memory, event-loop lag) you get for free from
+`collectDefaultMetrics`. Add business metrics later (orders placed, cache hit ratio, queue
+depth).
+
+---
+
+## Common pitfalls
+- ❌ High-cardinality labels (user IDs, raw URLs, timestamps) → series explosion, OOM.
+- ❌ Labeling by raw path instead of the route template.
+- ❌ Using a Counter for something that goes down (use a Gauge).
+- ❌ Histogram buckets that don't match your real latencies → useless percentiles.
+- ❌ Exposing `/metrics` publicly on the internet → scrape it only from your network.
+
+## Best practices
+- ✅ Instrument RED first; enable `collectDefaultMetrics`.
+- ✅ Use route templates as labels; keep cardinality low and bounded.
+- ✅ Pick histogram buckets around your expected latencies.
+- ✅ Name metrics by convention: `_total` for counters, base unit (`_seconds`, `_bytes`).
+
+## Try it yourself
+1. Add prom-client to the example app with the counter, histogram, and gauge above, plus
+   `/metrics`.
+2. `curl localhost:3000/metrics` and find `http_requests_total` and the
+   `http_request_duration_seconds_bucket` lines.
+3. Deliberately label by a raw ID once, watch the number of series balloon in `/metrics`,
+   then fix it to use the route template.
+
+➡️ Next: [Prometheus & PromQL](./04-prometheus-and-promql.mdx)

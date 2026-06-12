@@ -1,0 +1,166 @@
+---
+title: Prometheus & PromQL
+order: 4
+description: Run the Prometheus server, configure scraping, and query telemetry with PromQL — rates, aggregation, latency percentiles, and recording rules.
+---
+
+# The Prometheus Server & PromQL
+
+## What you'll learn
+- Configuring Prometheus to **scrape** your app
+- The Prometheus data model (time series, labels)
+- **PromQL** essentials: selectors, `rate()`, aggregation
+- Computing **error ratios** and **latency percentiles**
+- Recording rules
+
+---
+
+## Configure scraping
+Prometheus is driven by `prometheus.yml`. You tell it what to scrape and how often:
+```yaml
+global:
+  scrape_interval: 15s          # how often to scrape targets
+
+scrape_configs:
+  - job_name: 'orders-api'
+    metrics_path: /metrics      # default; shown for clarity
+    static_configs:
+      - targets: ['app:3000']   # host:port of your app (service name in Compose)
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']   # Prometheus scrapes itself
+```
+Run it (Docker):
+```bash
+docker run -p 9090:9090 -v "$(pwd)/prometheus.yml":/etc/prometheus/prometheus.yml prom/prometheus
+```
+Open http://localhost:9090 → **Status → Targets** to confirm your app is `UP`. (Compose
+wiring is in [Lesson 08](./08-production-stack-with-docker.mdx).)
+
+> In dynamic environments, Prometheus uses **service discovery** (Kubernetes, Consul, EC2…)
+> instead of static targets — it finds scrape targets automatically.
+
+---
+
+## The data model
+Every metric is a set of **time series**, each identified by its name **and labels**:
+```
+http_requests_total{app="orders-api", method="GET", route="/api", status="200"}
+                    └──────────────────── labels ────────────────────────────┘
+```
+Samples are `(timestamp, value)` pairs. PromQL queries select and transform these series.
+
+---
+
+## PromQL basics
+
+### Selectors
+```promql
+http_requests_total                              # all series with this name
+http_requests_total{status="500"}                # only 500s
+http_requests_total{status=~"5.."}               # regex: any 5xx
+http_requests_total{route!="/health"}            # exclude a label value
+```
+
+### `rate()` — the most important function
+Raw counters only ever go up; you almost always want the **per-second rate**. `rate()`
+computes it over a time window (and handles counter resets on restart):
+```promql
+rate(http_requests_total[5m])         # per-second request rate, averaged over 5m
+```
+> Use `rate()` for counters; never graph a raw counter (it's just an ever-climbing line).
+> Use `irate()` for fast-moving, spiky graphs; `rate()` for alerts and smooth trends.
+
+### Aggregation
+Combine series with `sum`, `avg`, `max`, `by`, `without`:
+```promql
+sum(rate(http_requests_total[5m]))                       # total RPS across all labels
+sum by (route) (rate(http_requests_total[5m]))           # RPS per route
+sum by (status) (rate(http_requests_total[5m]))          # RPS per status code
+```
+
+---
+
+## The queries you'll actually use
+
+**Request rate (Traffic):**
+```promql
+sum(rate(http_requests_total[5m]))
+```
+
+**Error ratio (Errors) — fraction of requests that are 5xx:**
+```promql
+sum(rate(http_requests_total{status=~"5.."}[5m]))
+  /
+sum(rate(http_requests_total[5m]))
+```
+
+**Latency percentiles (Duration) from a histogram:**
+```promql
+# p95 latency, in seconds
+histogram_quantile(0.95,
+  sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+)
+
+# p99 per route
+histogram_quantile(0.99,
+  sum by (le, route) (rate(http_request_duration_seconds_bucket[5m]))
+)
+```
+> Histograms bucket observations by upper bound (`le` = "less than or equal"). Always
+> `rate()` the `_bucket` series first, sum `by (le)`, then `histogram_quantile()`. This is
+> the standard incantation for percentiles — memorize it.
+
+**Memory (a gauge from default metrics):**
+```promql
+process_resident_memory_bytes
+nodejs_eventloop_lag_seconds          # event-loop lag — a key Node health signal
+```
+
+---
+
+## Recording rules — precompute expensive queries
+Queries you run often (dashboards, alerts) can be precomputed on a schedule and stored as
+new series — faster dashboards and consistent alert math:
+```yaml
+# rules.yml
+groups:
+  - name: http
+    interval: 30s
+    rules:
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+      - record: job:http_errors:ratio5m
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))
+            /
+          sum by (job) (rate(http_requests_total[5m]))
+```
+Reference `rules.yml` from `prometheus.yml` via `rule_files:`. The same expressions also
+drive alerts (Lesson 06).
+
+---
+
+## Common pitfalls
+- ❌ Graphing a raw counter instead of `rate()` → meaningless ever-rising line.
+- ❌ `histogram_quantile` without `rate()`-ing the buckets first → wrong percentiles.
+- ❌ Averaging percentiles across instances → statistically invalid; aggregate buckets, not
+  quantiles.
+- ❌ Too-short scrape/rate windows → noisy; too long → sluggish. ~15s scrape, `[5m]` rate is
+  a sane default.
+
+## Best practices
+- ✅ `rate()` counters over a window that's ≥ 4× the scrape interval.
+- ✅ Compute percentiles from histogram buckets with the standard pattern.
+- ✅ Move heavy/repeated queries into recording rules.
+- ✅ Verify targets are `UP` in Status → Targets after any config change.
+
+## Try it yourself
+1. Point Prometheus at the example app, generate traffic
+   (`for i in $(seq 1 200); do curl -s localhost:3000/api/ >/dev/null; done`), and run
+   `sum(rate(http_requests_total[1m]))` in the Prometheus graph UI.
+2. Compute the p95 latency with `histogram_quantile`.
+3. Add a recording rule for the error ratio and confirm the new series appears.
+
+➡️ Next: [Dashboards with Grafana](./05-dashboards-with-grafana.mdx)

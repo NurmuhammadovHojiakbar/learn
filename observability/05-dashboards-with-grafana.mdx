@@ -1,0 +1,155 @@
+---
+title: Dashboards with Grafana
+order: 5
+description: Visualize metrics in Grafana — add Prometheus as a data source, build RED panels, use variables, and provision dashboards as code.
+---
+
+# Dashboards with Grafana
+
+## What you'll learn
+- Connecting Grafana to Prometheus
+- Building a **RED dashboard** (Rate, Errors, Duration)
+- Template **variables** for reusable dashboards
+- **Provisioning** dashboards & data sources as code
+- Importing community dashboards
+
+Prometheus stores and queries metrics; **Grafana** is how you *see* them — dashboards,
+graphs, and exploration.
+
+---
+
+## Add Prometheus as a data source
+Run Grafana (Docker) and point it at Prometheus:
+```bash
+docker run -p 3000:3000 grafana/grafana
+```
+In the UI (**Connections → Data sources → Add → Prometheus**), set the URL to your
+Prometheus, e.g. `http://prometheus:9090` (the Compose service name). Better still, do it as
+code — see *Provisioning* below.
+
+---
+
+## Build a RED dashboard
+Create a dashboard and add panels, each backed by a PromQL query from
+[Lesson 04](./04-prometheus-and-promql.mdx).
+
+**Panel 1 — Request rate (Traffic), time series:**
+```promql
+sum by (route) (rate(http_requests_total[5m]))
+```
+
+**Panel 2 — Error ratio (Errors), time series or stat (as a %):**
+```promql
+sum(rate(http_requests_total{status=~"5.."}[5m]))
+  /
+sum(rate(http_requests_total[5m]))
+```
+
+**Panel 3 — Latency percentiles (Duration), time series:**
+```promql
+histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+```
+Add all three quantiles as separate queries on one panel to see p50/p95/p99 together.
+
+**Panel 4 — Saturation, time series:**
+```promql
+process_resident_memory_bytes
+nodejs_eventloop_lag_seconds
+```
+
+### Panel types you'll use most
+- **Time series** — trends over time (rate, latency).
+- **Stat** — a single big number (current error %, RPS).
+- **Gauge / Bar gauge** — a value against thresholds.
+- **Table** — top-N (e.g. slowest routes).
+
+Set **units** (seconds, percent, bytes) and **thresholds** (e.g. error ratio red above 1%)
+so panels are readable at a glance.
+
+---
+
+## Template variables — one dashboard, many targets
+Variables make a dashboard reusable instead of hardcoding labels. Add a variable
+`$route` of type *Query*:
+```promql
+label_values(http_requests_total, route)
+```
+Then use it in panels:
+```promql
+sum(rate(http_requests_total{route="$route"}[5m]))
+```
+A dropdown now lets you switch routes (or instances, services…) without editing queries.
+
+---
+
+## Provision dashboards & data sources as code
+Clicking around the UI is fine to explore, but production dashboards should be
+**version-controlled** and auto-loaded — no manual setup, reproducible across environments.
+
+**Data source** (`provisioning/datasources/datasource.yml`):
+```yaml
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+```
+
+**Dashboard provider** (`provisioning/dashboards/dashboards.yml`):
+```yaml
+apiVersion: 1
+providers:
+  - name: 'default'
+    folder: ''
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+```
+Drop dashboard JSON files in that path and Grafana loads them on startup. Mount these dirs
+into the container (see [Lesson 08](./08-production-stack-with-docker.mdx)). This is
+**dashboards-as-code** — review them in PRs like any other config.
+
+---
+
+## Don't reinvent — import community dashboards
+[grafana.com/dashboards](https://grafana.com/grafana/dashboards/) has thousands of ready
+dashboards. Import by ID (**Dashboards → New → Import**). Useful starters:
+- **Node.js Application** dashboards (for `prom-client` default metrics).
+- **Node Exporter Full** (host CPU/mem/disk) if you run `node_exporter`.
+- **Prometheus 2.0 Stats**.
+
+Use these as a base, then build app-specific RED panels on top.
+
+---
+
+## The Explore view
+Grafana's **Explore** tab is for ad-hoc querying during an incident — run PromQL (or LogQL
+for Loki, traces for Tempo/Jaeger) without building a panel. It's where you *ask new
+questions*, which is the heart of observability.
+
+---
+
+## Common pitfalls
+- ❌ Hand-built dashboards that live only in one Grafana instance → lost on redeploy.
+  Provision as code.
+- ❌ Panels with no units/thresholds → unreadable numbers.
+- ❌ Cramming 40 panels onto one dashboard → start with the 4 golden signals.
+- ❌ Averaging latency (`avg`) instead of percentiles → hides the slow tail users feel.
+
+## Best practices
+- ✅ Start every service with a RED dashboard (Rate, Errors, Duration) + saturation.
+- ✅ Provision data sources and dashboards as code; keep JSON in git.
+- ✅ Set units and threshold colors; use variables for reuse.
+- ✅ Import community dashboards for stock metrics; build custom for business metrics.
+
+## Try it yourself
+1. Run the [`examples/`](./examples) stack and log into Grafana (default `admin`/`admin`).
+2. Confirm the provisioned Prometheus data source and dashboard loaded automatically.
+3. Add a new panel showing p99 latency per route using `histogram_quantile`, set the unit to
+   seconds, and a red threshold at 1s.
+
+➡️ Next: [Alerting & SLOs](./06-alerting-and-slos.mdx)

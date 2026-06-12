@@ -1,0 +1,158 @@
+---
+title: Structured Logging
+order: 2
+description: Move from console.log to structured JSON logging in Node.js with pino — log levels, context, correlation IDs, and what to log (and not).
+---
+
+# Structured Logging
+
+## What you'll learn
+- Why **structured** (JSON) logs beat plain text
+- Logging in Node.js with **pino**
+- Log **levels** and when to use each
+- **Correlation IDs** to tie logs together (and to traces)
+- What to log — and what never to log
+
+---
+
+## Why structured logging?
+`console.log('user 1000 logged in from 1.2.3.4')` is fine for a human reading one line. But
+in production you have millions of lines across many instances, and you need to **query**
+them: "all errors for `orderId=A123`", "p95 latency by route". Free-text can't do that.
+
+**Structured logs** emit each event as JSON with named fields, so a log system (Loki, ELK,
+CloudWatch) can index and filter them:
+```json
+{"level":"info","time":1718185200000,"msg":"user logged in","userId":1000,"ip":"1.2.3.4","reqId":"r-9f2a"}
+```
+Now "show errors where `orderId=A123`" is a field query, not a regex prayer.
+
+---
+
+## Logging with pino
+[`pino`](https://github.com/pinojs/pino) is a fast, low-overhead JSON logger — the de-facto
+choice for Node.
+
+```bash
+npm install pino
+```
+```js
+import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+});
+
+logger.info('server started');
+logger.info({ userId: 1000, ip: '1.2.3.4' }, 'user logged in');  // structured fields
+logger.error({ err, orderId: 'A123' }, 'payment failed');         // pass the error object
+```
+Pass an **object first** for structured fields, then the message. Pino serializes errors
+(`err`) with stack traces automatically.
+
+### Pretty logs in development
+JSON is for machines; for local dev, pipe through `pino-pretty`:
+```bash
+npm install -D pino-pretty
+node app.js | npx pino-pretty
+```
+> In production, log **raw JSON to stdout** and let the platform collect it (see the
+> [Docker logging](../docker/08-production-and-orchestration.mdx) lesson). Don't pretty-print
+> in prod.
+
+---
+
+## Log levels
+Use levels so you can turn verbosity up/down without code changes (`LOG_LEVEL=debug`):
+| Level | Use for |
+|-------|---------|
+| `fatal` | The app is going down |
+| `error` | A request/operation failed (needs attention) |
+| `warn` | Something unexpected but handled (retry, fallback) |
+| `info` | Normal high-level events (startup, request completed) |
+| `debug` | Detailed diagnostic info (off in prod by default) |
+| `trace` | Very verbose, per-step detail |
+
+A logger set to `info` emits `info` and above; `debug`/`trace` are dropped — cheap to leave
+in the code.
+
+---
+
+## Correlation IDs — tie a request's logs together
+A single request emits many log lines (and runs across services). Attach a **request ID**
+to every line so you can reconstruct one request's story. Use a **child logger** bound to
+that ID:
+
+```js
+import { randomUUID } from 'crypto';
+
+app.use((req, res, next) => {
+  // Reuse an incoming ID (from Nginx/another service) or generate one
+  const reqId = req.headers['x-request-id'] || randomUUID();
+  req.log = logger.child({ reqId });        // every log from this request carries reqId
+  res.setHeader('x-request-id', reqId);     // pass it downstream / back to the client
+  next();
+});
+
+app.get('/api/orders/:id', (req, res) => {
+  req.log.info({ orderId: req.params.id }, 'fetching order');
+  // ...
+});
+```
+Now filtering by `reqId=r-9f2a` shows every step of that one request. The **same ID** can be
+attached to traces (Lesson 07), linking logs ↔ traces.
+
+> Tip: have Nginx generate/forward `X-Request-ID` (it exposes `$request_id`) so the ID spans
+> the proxy and the app.
+
+---
+
+## What to log — and what NOT to
+**Do log:**
+- Request start/finish with method, route, status, duration.
+- Errors with stack traces and context (which user/order/resource).
+- Significant state changes (payment captured, job completed).
+- External calls and their outcomes/latency.
+
+**Never log:**
+- 🚫 Passwords, tokens, API keys, session cookies.
+- 🚫 Full credit-card numbers, secrets, raw PII beyond what you need.
+- 🚫 Entire request/response bodies by default (huge + leaky).
+
+Pino supports **redaction** to scrub sensitive fields automatically:
+```js
+const logger = pino({
+  redact: ['req.headers.authorization', 'password', '*.creditCard'],
+});
+```
+
+---
+
+## Logs vs metrics — don't confuse them
+Don't derive high-cardinality counts by parsing logs in real time — that's what **metrics**
+are for (Lesson 03). Log discrete events for context; count/measure with metrics. Using logs
+as metrics is slow and expensive.
+
+---
+
+## Common pitfalls
+- ❌ Free-text logs you can't query → use structured JSON.
+- ❌ Logging secrets/PII → redact, and don't log bodies by default.
+- ❌ No correlation ID → can't follow a request across lines/services.
+- ❌ Everything at `info`/no levels → can't dial verbosity in an incident.
+- ❌ Pretty-printing in production (slow) or logging to files instead of stdout.
+
+## Best practices
+- ✅ Structured JSON to stdout; collect it at the platform layer.
+- ✅ Child logger with a `reqId` per request; propagate `X-Request-ID`.
+- ✅ Use levels; control with `LOG_LEVEL`.
+- ✅ Redact sensitive fields; log context, not dumps.
+
+## Try it yourself
+1. Add pino to the example app, log request start/finish with method, route, status, and
+   duration as fields.
+2. Add the `reqId` child-logger middleware and confirm every line of one request shares the
+   same `reqId`.
+3. Add `redact` for `authorization` headers and verify the token shows as `[Redacted]`.
+
+➡️ Next: [Metrics with Prometheus](./03-metrics-with-prometheus.mdx)
