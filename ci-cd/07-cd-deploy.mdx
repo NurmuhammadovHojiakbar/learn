@@ -1,0 +1,157 @@
+---
+title: "CD: Deploy"
+order: 7
+description: Ship the published image to a real environment — deployment strategies, manual approval gates, and rollbacks.
+---
+
+# CD: Deploying Your App
+
+## What you'll learn
+- Common **deployment strategies**
+- A gated deploy with **environments** and **manual approval**
+- Deploying a container to a server / PaaS
+- How to **roll back** when something goes wrong
+
+By now CI builds and publishes an immutable image ([Lesson 06](./06-docker-build-and-publish.mdx)).
+Deployment is the step that runs that image somewhere real.
+
+---
+
+## Deployment strategies
+| Strategy | How it works | Trade-off |
+|----------|--------------|-----------|
+| **Recreate** | Stop old, start new | Simple; brief downtime |
+| **Rolling** | Replace instances gradually | Zero downtime; two versions briefly coexist |
+| **Blue-Green** | Run new ("green") beside old ("blue"), switch traffic | Instant switch + rollback; needs 2× capacity |
+| **Canary** | Send a small % of traffic to the new version first | Safest; needs traffic-splitting infra |
+
+Start with **rolling** (most orchestrators/PaaS do it by default). Adopt blue-green/canary
+as risk and scale grow.
+
+---
+
+## A gated deploy workflow
+This deploys only after CI passes, only from `main`, and only after a human approves the
+`production` environment.
+
+```yaml
+name: Deploy
+on:
+  workflow_run:                       # run after the "Publish image" workflow succeeds
+    workflows: ["Publish image"]
+    types: [completed]
+  workflow_dispatch:                  # ...or trigger manually
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: production           # ← approval gate + prod secrets live here
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to server
+        run: ./scripts/deploy.sh
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+```
+
+Because the job targets `environment: production` (configured with a **required reviewer**
+in [Lesson 05](./05-secrets-and-environments.mdx)), the run **pauses** until someone clicks
+**Approve** — that's Continuous *Delivery*. Remove the reviewer and it becomes Continuous
+*Deployment*.
+
+---
+
+## What "deploy" actually does
+The deploy step depends on your target. Common shapes:
+
+**SSH to a server running Compose/Docker:**
+```bash
+# scripts/deploy.sh (sketch)
+ssh "$DEPLOY_HOST" "
+  docker pull $IMAGE &&
+  docker tag $IMAGE myapp:current &&
+  docker compose up -d           # rolling restart with the new image
+"
+```
+
+**Push to a PaaS (often a one-liner action):**
+```yaml
+      - name: Deploy to Fly.io
+        run: flyctl deploy --image $IMAGE
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+```
+Render, Railway, Cloud Run, ECS, and Kubernetes (`kubectl set image ...` /
+`helm upgrade`) follow the same idea: tell the platform to run the new immutable image.
+
+---
+
+## Multiple environments
+Promote the **same image** through environments — never rebuild per environment:
+```yaml
+jobs:
+  deploy-staging:
+    environment: staging            # auto-deploys (no required reviewer)
+    runs-on: ubuntu-latest
+    steps: [ ... deploy IMAGE to staging ... ]
+
+  deploy-production:
+    needs: deploy-staging           # only after staging succeeds
+    environment: production         # requires approval
+    runs-on: ubuntu-latest
+    steps: [ ... deploy the SAME IMAGE to production ... ]
+```
+Build once, promote the identical artifact: staging → (approve) → production.
+
+---
+
+## Rollbacks
+Because every deploy uses an **immutable** image tag, rolling back is just deploying a
+previous tag:
+```bash
+# redeploy the last known-good SHA
+IMAGE=ghcr.io/acme/myapp:sha-<previous-good> ./scripts/deploy.sh
+```
+- Keep the previous image available (don't delete old tags immediately).
+- A `workflow_dispatch` "deploy" workflow that takes an image tag as input makes rollback a
+  two-click operation.
+- Blue-green makes rollback instant: switch traffic back to the old color.
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (e.g. sha-ab12cd)'
+        required: true
+```
+
+---
+
+## Common pitfalls
+- ❌ Rebuilding the image per environment → staging and prod aren't the same artifact.
+- ❌ Deploying by `latest` → no idea what's live, no clean rollback.
+- ❌ No approval gate on production → accidental prod deploys.
+- ❌ No rollback plan / deleting old images → stuck when a deploy goes bad.
+- ❌ Secrets for prod accessible to non-prod jobs → scope them to the environment.
+
+## Best practices
+- ✅ Promote one immutable image through environments; deploy by SHA/semver tag.
+- ✅ Gate production with an environment + required reviewer.
+- ✅ Keep recent images so rollback = redeploy a previous tag.
+- ✅ Add a health check after deploy; auto-rollback if it fails.
+- ✅ Prefer rolling/blue-green for zero-downtime releases.
+
+## Try it yourself
+1. Add a `staging` (auto) and `production` (required reviewer) environment; deploy the same
+   image to both, approving prod.
+2. Build a `workflow_dispatch` deploy that takes an `image_tag` input, and use it to "roll
+   back" to a previous SHA.
+3. Add a post-deploy `curl .../health` step that fails the job (and triggers your rollback)
+   if the app isn't healthy.
+
+➡️ Next: [Pipeline Best Practices](./08-best-practices.mdx)

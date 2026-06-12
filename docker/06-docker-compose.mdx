@@ -1,0 +1,147 @@
+---
+title: Docker Compose
+order: 6
+description: Define and run multi-service applications with a single YAML file — a Node + Redis stack with networks, volumes, and healthchecks.
+---
+
+# Docker Compose
+
+## What you'll learn
+- What Compose solves and the `compose.yaml` structure
+- Defining multiple services (a **Node + Redis** stack)
+- `depends_on`, healthchecks, env vars, volumes, and networks
+- The Compose workflow commands
+
+---
+
+## Why Compose?
+Running a real app means juggling several containers — your API, a database, Redis, maybe a
+worker — each with its own ports, volumes, network, and env. Doing that with long
+`docker run` commands is painful and error-prone.
+
+**Docker Compose** declares the whole stack in one file and brings it up/down with one
+command. It automatically creates a shared network so services find each other **by name**.
+
+---
+
+## A Node + Redis stack
+Create `compose.yaml` (also accepted: `docker-compose.yml`):
+
+```yaml
+services:
+  api:
+    build: .                     # build from the Dockerfile in this directory
+    ports:
+      - "3000:3000"              # host:container
+    environment:
+      REDIS_URL: redis://redis:6379   # "redis" = the service name below
+      NODE_ENV: production
+    depends_on:
+      redis:
+        condition: service_healthy    # wait until Redis passes its healthcheck
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data         # persist Redis data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:                    # named volume, managed by Docker
+```
+
+Bring it up:
+```bash
+docker compose up -d           # build (if needed) + start in the background
+docker compose ps              # see services
+docker compose logs -f api     # tail one service's logs
+curl localhost:3000
+docker compose down            # stop & remove containers + network
+docker compose down -v         # also remove named volumes (wipes data)
+```
+
+> The Node app reaches Redis at `redis://redis:6379` — the **service name** is the hostname,
+> thanks to Compose's automatic network. This is the [Lesson 05](./05-volumes-and-networking.mdx)
+> networking concept, done for you.
+
+---
+
+## Key fields explained
+| Field | Purpose |
+|-------|---------|
+| `build` / `image` | Build from a Dockerfile, or pull a prebuilt image |
+| `ports` | Publish container ports to the host |
+| `environment` / `env_file` | Inject config (inline, or from a `.env` file) |
+| `volumes` | Mount named volumes or bind mounts |
+| `depends_on` | Start ordering; with `condition: service_healthy`, wait for health |
+| `healthcheck` | How Compose decides a service is ready |
+| `restart` | `no` / `on-failure` / `always` / `unless-stopped` |
+| `networks` | Custom networks (a default one is created automatically) |
+
+> **`depends_on` caveat:** without a healthcheck condition, it only waits for the container
+> to *start*, not to be *ready*. Use `condition: service_healthy` (as above) so your API
+> doesn't race ahead of Redis.
+
+---
+
+## Dev vs prod with overrides
+Compose merges `compose.yaml` with an optional `compose.override.yaml` automatically. Keep
+production config in the base file and dev-only tweaks (bind mounts, hot reload) in the
+override:
+
+```yaml
+# compose.override.yaml (dev only)
+services:
+  api:
+    build:
+      target: builder            # use the dev stage with dev deps
+    volumes:
+      - .:/app                    # live code editing
+      - /app/node_modules         # keep container's node_modules
+    command: ["npm", "run", "dev"]
+    environment:
+      NODE_ENV: development
+```
+
+For production you'd run `docker compose -f compose.yaml up -d` (base only).
+
+---
+
+## Handy commands
+```bash
+docker compose up -d --build      # rebuild images then start
+docker compose exec api sh        # shell into the running api service
+docker compose restart api
+docker compose stop               # stop without removing
+docker compose down               # stop + remove containers/network
+docker compose config             # validate & print the resolved config
+```
+
+---
+
+## Common pitfalls
+- ❌ Using `localhost` between services — use the **service name** (`redis`, not `localhost`).
+- ❌ `depends_on` without a health condition → API starts before the DB is ready.
+- ❌ `docker compose down -v` in production — it deletes your data volumes.
+- ❌ Hardcoding secrets in `compose.yaml` — use an `env_file` (gitignored) or secrets.
+
+## Best practices
+- ✅ One service per container; reference others by service name.
+- ✅ Add healthchecks and `depends_on: condition: service_healthy`.
+- ✅ Persist stateful services with named volumes.
+- ✅ Split base vs override files for prod/dev.
+- ✅ `docker compose config` in CI to validate the file.
+
+## Try it yourself
+1. Copy the [`examples/docker-compose.yml`](./examples/docker-compose.yml), run
+   `docker compose up -d`, and curl the API — it should read/write Redis.
+2. `docker compose down` then `up` again — confirm Redis data persisted via the named volume.
+3. Add a healthcheck to the `api` service hitting `/health` and watch `docker compose ps`
+   report it as `healthy`.
+
+➡️ Next: [Best Practices & Security](./07-best-practices-and-security.mdx)

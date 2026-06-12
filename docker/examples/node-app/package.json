@@ -1,0 +1,15 @@
+{
+  "name": "docker-node-demo",
+  "version": "1.0.0",
+  "description": "Tiny Express + Redis app for the Docker course examples",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "redis": "^4.7.0"
+  }
+}

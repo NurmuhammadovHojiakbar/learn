@@ -1,0 +1,55 @@
+# Gated deployment (Lesson 07).
+# Promotes the SAME immutable image to staging (auto) then production (manual approval).
+# Supports manual rollback via workflow_dispatch with an image tag input.
+# Copy to .github/workflows/deploy.yml.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["Publish image"]   # run after the image is published
+    types: [completed]
+  workflow_dispatch:               # manual run / rollback
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (e.g. sha-ab12cd or 1.4.2)'
+        required: false
+        default: 'latest'
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy-staging:
+    # Only proceed if the publish workflow succeeded, or if triggered manually.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: staging           # auto-deploys (no required reviewer)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to staging
+        run: ./scripts/deploy.sh
+        env:
+          DEPLOY_IMAGE: ${{ env.IMAGE }}:${{ github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+          DEPLOY_HOST: ${{ secrets.STAGING_HOST }}
+          DEPLOY_KEY: ${{ secrets.STAGING_KEY }}
+
+  deploy-production:
+    needs: deploy-staging          # promote only after staging succeeds
+    runs-on: ubuntu-latest
+    environment: production        # configure a REQUIRED REVIEWER on this environment
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to production
+        run: ./scripts/deploy.sh
+        env:
+          DEPLOY_IMAGE: ${{ env.IMAGE }}:${{ github.event.inputs.image_tag || format('sha-{0}', github.sha) }}
+          DEPLOY_HOST: ${{ secrets.PROD_HOST }}
+          DEPLOY_KEY: ${{ secrets.PROD_KEY }}
+
+      - name: Post-deploy health check
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "https://myapp.example.com/health"; then exit 0; fi
+            sleep 5
+          done
+          echo "Health check failed — investigate / roll back" && exit 1

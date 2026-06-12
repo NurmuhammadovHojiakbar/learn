@@ -1,0 +1,130 @@
+---
+title: Pipeline Best Practices
+order: 8
+description: Make pipelines fast, reliable, secure, and maintainable — caching, parallelism, reusable workflows, composite actions, and security hardening.
+---
+
+# CI/CD Best Practices
+
+## What you'll learn
+- Keeping pipelines **fast** and **reliable**
+- **Reusing** workflow logic (reusable workflows, composite actions)
+- **Securing** your pipeline
+- Habits that keep CI/CD healthy as a project grows
+
+---
+
+## Fast pipelines
+Slow pipelines get ignored. Keep them quick:
+- **Cache dependencies** — `cache: npm` in `setup-node`; `type=gha` for Docker layers.
+- **Parallelize** — run independent jobs (lint, test, typecheck) at once, not in sequence.
+- **Fail fast on cheap checks** — run lint/format before the expensive test/build matrix.
+- **Filter triggers** — `paths:` so doc-only changes don't run the full build.
+- **Right-size the matrix** — only the versions/OSes you actually support.
+- **Shard big test suites** across matrix legs if they dominate runtime.
+
+---
+
+## Reliable pipelines
+- **Pin action versions** (`@v4` or a commit SHA) so a third-party update can't break or
+  compromise you overnight.
+- **`npm ci`**, not `npm install` — reproducible from the lockfile.
+- **Healthchecks on service containers** so integration tests don't race dependencies.
+- **Eliminate flaky tests** — a pipeline people don't trust is worthless. Quarantine and
+  fix flakes; don't blanket-retry.
+- **Set timeouts** so a hung job doesn't burn minutes: `timeout-minutes: 15`.
+
+---
+
+## Reuse: don't copy-paste workflows
+
+**Reusable workflows** — call one workflow from another (DRY across repos/jobs):
+```yaml
+# .github/workflows/reusable-node-ci.yml
+on:
+  workflow_call:
+    inputs:
+      node-version: { type: string, default: '20' }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ inputs.node-version }}, cache: npm }
+      - run: npm ci
+      - run: npm test
+```
+```yaml
+# another workflow calls it
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable-node-ci.yml
+    with: { node-version: '20' }
+```
+
+**Composite actions** — bundle a sequence of steps you repeat into one local action
+(`.github/actions/setup/action.yml`) and `uses: ./.github/actions/setup`.
+
+---
+
+## Security hardening
+- **Least-privilege `GITHUB_TOKEN`** — set `permissions:` to the minimum (default to
+  `contents: read`, add `packages: write` only where needed):
+  ```yaml
+  permissions:
+    contents: read
+  ```
+- **Secrets, never inline** — and never `echo` them or write them to artifacts.
+- **Pin third-party actions to a SHA** for supply-chain safety, not just a moving tag.
+- **Be careful with `pull_request_target`** and untrusted PRs — they can expose secrets to
+  forked code. Prefer `pull_request` (no secrets) for fork CI.
+- **OIDC over stored cloud keys** ([Lesson 05](./05-secrets-and-environments.mdx)).
+- **Scan dependencies & images** (Dependabot, `trivy`, `docker scout`) in the pipeline.
+- **Protect `main`** with required checks and required reviews.
+
+---
+
+## Maintainability
+- **One workflow per purpose** (`ci.yml`, `docker-publish.yml`, `deploy.yml`) — easier to
+  reason about than one mega-file.
+- **Name steps and jobs** clearly for readable logs.
+- **Keep logic in scripts** (`scripts/deploy.sh`) the workflow calls, so it's testable
+  locally and not buried in YAML.
+- **Validate workflows** — `actionlint` catches errors before you push.
+
+---
+
+## A healthy pipeline checklist
+- ✅ Runs on every push and PR; `main` protected by required checks.
+- ✅ Dependency + Docker layer caching enabled.
+- ✅ Independent jobs run in parallel; cheap checks fail fast.
+- ✅ Actions pinned; `GITHUB_TOKEN` least-privilege; secrets never inline.
+- ✅ Service containers have healthchecks; tests aren't flaky.
+- ✅ Build the image once; deploy that immutable tag; rollback ready.
+- ✅ Production gated by an environment + reviewer.
+- ✅ Dependency/image scanning wired in.
+
+---
+
+## Common pitfalls
+- ❌ One giant unmaintainable workflow file.
+- ❌ Copy-pasted job blocks instead of reusable workflows/composite actions.
+- ❌ Over-broad token permissions and unpinned third-party actions.
+- ❌ Tolerating flaky tests / no timeouts.
+- ❌ No caching → slow pipelines nobody waits for.
+
+## Best practices (recap)
+- ✅ Fast (cache + parallel), reliable (pin + reproducible + no flakes), secure
+  (least-privilege + scanning), and DRY (reusable workflows).
+
+## Try it yourself
+1. Add `permissions: contents: read` at the top of a workflow and only widen it where a job
+   needs more.
+2. Extract your CI job into a **reusable workflow** and call it from two different workflows.
+3. Run `actionlint` over your `.github/workflows/` and fix anything it flags.
+
+🎉 **You've completed the CI/CD course.** Combined with the [Docker](../docker/README.md)
+and [Redis](../redis/README.md) courses, you can now build a Node app, containerize it, and
+automatically test and ship it with confidence.

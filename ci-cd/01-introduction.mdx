@@ -1,0 +1,114 @@
+---
+title: Introduction to CI/CD
+order: 1
+description: What Continuous Integration, Delivery, and Deployment actually mean, why they matter, and the stages of a typical pipeline.
+---
+
+# Introduction to CI/CD
+
+## What you'll learn
+- What CI, CD (Delivery), and CD (Deployment) each mean
+- The problems they solve
+- The stages of a typical pipeline
+- Where GitHub Actions fits in
+
+---
+
+## The problem
+Without automation, shipping software looks like: someone runs tests on their laptop
+(maybe), merges, then manually builds and copies files to a server. This is slow,
+inconsistent, and error-prone — "it worked on my machine," broken `main`, forgotten steps,
+3 a.m. deploys.
+
+**CI/CD** replaces all of that with an automated **pipeline** that runs on every change.
+
+---
+
+## CI — Continuous Integration
+Developers **integrate** their work frequently (several times a day), and **every push is
+automatically built and tested**. Problems are caught within minutes of being introduced,
+while the change is small and fresh in your mind.
+
+A CI run typically: checks out the code → installs dependencies → **lints** → runs
+**tests** → builds. If anything fails, the pipeline goes red and (with branch protection)
+the change can't merge.
+
+> Core idea: **keep `main` always working.** Broken code is caught before it lands.
+
+---
+
+## CD — two meanings
+**Continuous Delivery:** every change that passes CI is automatically built into a
+**release-ready artifact** (e.g. a Docker image) and could be deployed at the click of a
+button. The final push to production is a **manual approval**.
+
+**Continuous Deployment:** goes one step further — every change that passes CI is
+**automatically deployed to production**, no human gate.
+
+```
+ Continuous Delivery:   commit → CI → build artifact → [manual approve] → prod
+ Continuous Deployment: commit → CI → build artifact → prod   (fully automatic)
+```
+
+Most teams start with Delivery (a human approves prod) and move toward Deployment as their
+tests and confidence grow.
+
+---
+
+## Why it matters
+- **Catch bugs early** — minutes after a push, not in production.
+- **Ship faster & more often** — small, frequent, low-risk releases.
+- **Consistency** — the same automated steps every time; no forgotten manual ones.
+- **Confidence** — a green pipeline means it built, linted, and passed tests.
+- **Easy rollback** — versioned artifacts make reverting trivial.
+
+---
+
+## Stages of a typical pipeline
+```
+ ┌────────┐  ┌──────────┐  ┌──────┐  ┌───────┐  ┌───────┐  ┌────────┐  ┌────────┐
+ │ Source │─▶│ Install/ │─▶│ Lint │─▶│ Test  │─▶│ Build │─▶│Publish │─▶│ Deploy │
+ │ (push) │  │ restore  │  │      │  │       │  │ image │  │artifact│  │        │
+ └────────┘  └──────────┘  └──────┘  └───────┘  └───────┘  └────────┘  └────────┘
+        └──────────── CI ───────────────────┘     └──────────── CD ─────────────┘
+```
+1. **Source** — a push or pull request triggers the pipeline.
+2. **Install** — restore dependencies (with caching).
+3. **Lint** — static checks / formatting.
+4. **Test** — unit + integration tests.
+5. **Build** — compile / bundle / build a Docker image.
+6. **Publish** — push the artifact/image to a registry.
+7. **Deploy** — release to staging/production (auto or gated).
+
+---
+
+## Where GitHub Actions fits
+**GitHub Actions** is GitHub's built-in CI/CD platform. You describe pipelines as YAML
+**workflow** files in `.github/workflows/`, and GitHub runs them on its hosted machines
+whenever the events you choose occur (push, PR, tag, schedule, …). No separate CI server to
+operate. The rest of this course uses it as the concrete tool — the *concepts* transfer to
+GitLab CI, CircleCI, Jenkins, etc.
+
+---
+
+## Common pitfalls
+- ❌ Treating CI as optional / ignoring red builds — a broken pipeline you ignore is worse
+  than none.
+- ❌ Slow pipelines (no caching, no parallelism) → people stop waiting for them.
+- ❌ Jumping straight to full auto-deploy before your tests are trustworthy.
+- ❌ Manual deploy steps "just this once" — that's where outages come from.
+
+## Best practices
+- ✅ Run CI on **every** push and pull request.
+- ✅ Keep `main` green; block merges on failing checks (branch protection).
+- ✅ Make pipelines fast (cache deps, parallelize) so they're actually used.
+- ✅ Build the artifact **once**, then promote the same one through environments.
+
+## Try it yourself
+1. Look at a project you have on GitHub — open the **Actions** tab. Does it run anything?
+2. Sketch the pipeline you'd want for it: which steps (lint? test? build? deploy?) and on
+   which triggers (push? PR? tag?).
+3. Decide: would you want Continuous *Delivery* (manual prod approval) or *Deployment*
+   (fully automatic)? Why?
+
+➡️ Next: [GitHub Actions Basics](./02-github-actions-basics.mdx)

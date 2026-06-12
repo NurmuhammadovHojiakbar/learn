@@ -1,0 +1,153 @@
+---
+title: Matrix & Service Containers
+order: 4
+description: Test across multiple Node versions and operating systems with build matrices, and spin up a real Redis with service containers for integration tests.
+---
+
+# Matrix Builds & Service Containers
+
+## What you'll learn
+- **Matrix builds** — run the same job across many versions/OSes
+- **Service containers** — run real dependencies (Redis, Postgres) alongside your tests
+- Wiring integration tests against the [Redis app](../redis/README.md)
+
+---
+
+## Matrix builds
+A **matrix** runs a job once for every combination of values you list — perfect for
+verifying your app works on multiple Node versions or operating systems, in parallel.
+
+```yaml
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false              # don't cancel siblings if one fails
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+```
+This produces **6 parallel jobs** (2 OS × 3 Node versions). `fail-fast: false` lets them all
+finish so you see every failure, not just the first.
+
+### Excluding / including combinations
+```yaml
+matrix:
+  os: [ubuntu-latest, windows-latest]
+  node-version: [18, 20, 22]
+  exclude:
+    - os: windows-latest
+      node-version: 18          # skip this one combo
+  include:
+    - os: ubuntu-latest
+      node-version: 20
+      coverage: true            # add an extra flag to one combo
+```
+
+---
+
+## Service containers
+Integration tests often need a real database or cache. **Service containers** let GitHub
+start Docker containers (Redis, Postgres, etc.) that live for the duration of the job and
+are reachable from your steps.
+
+```yaml
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379            # map the service port to the runner
+        options: >-              # wait until Redis is healthy before tests run
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Run integration tests
+        run: npm test
+        env:
+          REDIS_URL: redis://localhost:6379    # reach the service on localhost
+```
+
+### How your tests reach the service
+Because the job runs **directly on the runner** (not inside a container), the service is
+reachable at **`localhost:<mapped-port>`** — here `redis://localhost:6379`. Your test code
+reads `process.env.REDIS_URL`:
+
+```js
+// in your tests
+const client = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+```
+
+> ⚠️ If your **job itself** runs inside a container (via `container:`), you instead reach
+> services by their **label** (`redis:6379`), like Docker Compose. On a normal runner, it's
+> `localhost`.
+
+---
+
+## Combining matrix + services
+Run integration tests against Redis across several Node versions:
+```yaml
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node-version }}, cache: npm }
+      - run: npm ci
+      - run: npm test
+        env:
+          REDIS_URL: redis://localhost:6379
+```
+
+The complete version is in [`examples/ci.yml`](./examples/ci.yml).
+
+---
+
+## Common pitfalls
+- ❌ No healthcheck on the service → tests start before Redis is ready and flake.
+- ❌ Using the service **label** instead of `localhost` when the job runs on the runner
+  (not in a container).
+- ❌ `fail-fast: true` (default) hiding failures in other matrix legs while debugging.
+- ❌ Huge matrices that waste minutes — test the versions you actually support.
+
+## Best practices
+- ✅ Always add health options to service containers.
+- ✅ Pass connection info via `env` (e.g. `REDIS_URL`) so code stays environment-agnostic.
+- ✅ Keep the matrix focused on supported versions; use `exclude` to trim dead combos.
+- ✅ Use `fail-fast: false` when you want full visibility across the matrix.
+
+## Try it yourself
+1. Add a matrix over `node-version: [18, 20, 22]` to your CI and watch three parallel jobs.
+2. Add a Redis service container with a healthcheck and an integration test that does a
+   `SET`/`GET` against `redis://localhost:6379`.
+3. Break the test on just Node 18 (e.g. use a newer API) and confirm only that matrix leg
+   goes red.
+
+➡️ Next: [Secrets & Environments](./05-secrets-and-environments.mdx)

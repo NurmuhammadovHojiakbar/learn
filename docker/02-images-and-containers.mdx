@@ -1,0 +1,145 @@
+---
+title: Images & Containers
+order: 2
+description: The mental model behind Docker — images as layered templates, containers as running instances, registries, and the container lifecycle.
+---
+
+# Images & Containers
+
+## What you'll learn
+- The precise difference between images and containers
+- How image **layers** and tags work
+- Pulling from and pushing to **registries**
+- The full **container lifecycle** and the commands to manage it
+
+---
+
+## Image vs Container
+- An **image** is an immutable, read-only template: a snapshot of a filesystem plus
+  metadata (which command to run, env vars, ports). Think *class*.
+- A **container** is a running (or stopped) instance of an image with a thin writable
+  layer on top. Think *object*.
+
+You can start many containers from one image; each gets its own isolated writable layer.
+
+```bash
+docker images        # list local images (templates)
+docker ps -a         # list containers (instances), running or stopped
+```
+
+---
+
+## Images are layered
+An image is built from stacked, cached **layers** — each instruction in a Dockerfile adds
+one. Layers are shared between images, so pulling a second Node image that uses the same
+base is fast (the base layer is already on disk).
+
+```
+  ┌─────────────────────────┐  ← your app code        (layer 4)
+  ┌─────────────────────────┐  ← npm install          (layer 3)
+  ┌─────────────────────────┐  ← node runtime         (layer 2)
+  ┌─────────────────────────┐  ← base OS (alpine)     (layer 1)
+```
+
+This layering is the key to fast, cache-friendly builds — covered in
+[Lesson 03](./03-dockerfile.mdx).
+
+---
+
+## Tags & names
+An image reference is `name:tag`. The tag usually marks a version; `latest` is the default
+if you omit it.
+
+```bash
+node:20-alpine            # repo "node", tag "20-alpine"
+myapp:1.2.0
+ghcr.io/acme/myapp:latest # fully qualified: registry/owner/name:tag
+```
+
+> ⚠️ `latest` is **not** automatically the newest — it's just a default tag name. In
+> production, pin specific versions (`node:20.11-alpine`) for reproducible builds.
+
+---
+
+## Registries
+A **registry** stores and distributes images.
+- **Docker Hub** — the default public registry (`docker pull node` comes from here).
+- **GHCR** — GitHub Container Registry (`ghcr.io/...`), great with GitHub Actions.
+- **Cloud registries** — ECR (AWS), Artifact Registry (GCP), ACR (Azure).
+
+```bash
+docker pull redis:7                 # download an image
+docker login ghcr.io                # authenticate to push
+docker tag myapp ghcr.io/me/myapp:1.0
+docker push ghcr.io/me/myapp:1.0    # upload
+```
+(CI/CD builds and pushes images for you — see the
+[CI/CD course](../ci-cd/06-docker-build-and-publish.mdx).)
+
+---
+
+## The container lifecycle
+```
+ docker run ──▶ [running] ──stop──▶ [stopped] ──start──▶ [running]
+                    │                    │
+                  rm (after stop) ◀──────┘
+```
+
+```bash
+docker run -d --name api myapp        # create + start (detached)
+docker stop api                       # graceful stop (SIGTERM, then SIGKILL)
+docker start api                      # restart the same container
+docker restart api
+docker rm api                         # remove a stopped container (-f forces a running one)
+docker run --rm myapp                 # auto-remove when it exits (great for one-offs)
+```
+
+---
+
+## Inspecting & interacting
+```bash
+docker logs -f api                    # stream logs
+docker exec -it api sh                # open a shell inside a running container
+docker inspect api                    # full JSON: config, networks, mounts
+docker stats                          # live CPU/memory usage
+docker top api                        # processes running inside
+docker cp api:/app/log.txt ./log.txt  # copy a file out of a container
+```
+
+`docker exec -it ... sh` (or `bash`) is your go-to for debugging what's happening inside.
+
+---
+
+## Cleaning up (reclaiming disk)
+Images and stopped containers pile up and eat disk.
+```bash
+docker rm $(docker ps -aq)        # remove all stopped containers
+docker image prune                # remove dangling (untagged) images
+docker system prune               # containers + networks + dangling images
+docker system prune -a --volumes  # aggressive: also unused images & volumes (careful!)
+docker system df                  # see what's using space
+```
+
+---
+
+## Common pitfalls
+- ❌ Relying on `latest` in production → surprise version changes. Pin tags.
+- ❌ Letting stopped containers and old images accumulate → disk fills up. Prune regularly.
+- ❌ Editing files inside a running container and expecting them to persist — they vanish
+  when the container is removed. Rebuild the image or use a volume.
+- ❌ `docker rm` on a running container fails — `stop` first, or use `rm -f`.
+
+## Best practices
+- ✅ Pin image versions for reproducibility.
+- ✅ Use `--rm` for throwaway/one-off containers.
+- ✅ Name your containers (`--name`) so commands are readable.
+- ✅ Prune unused images/containers on a schedule.
+
+## Try it yourself
+1. `docker pull redis:7` then `docker images` — note the layers/size.
+2. Run two containers from the same image with different names; confirm both appear in
+   `docker ps`.
+3. `docker exec -it` into one, create a file in `/tmp`, exit, remove the container, start a
+   fresh one from the same image — the file is gone. That's the disposable model.
+
+➡️ Next: [Writing a Dockerfile](./03-dockerfile.mdx)

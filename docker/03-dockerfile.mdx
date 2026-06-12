@@ -1,0 +1,156 @@
+---
+title: Writing a Dockerfile
+order: 3
+description: Author images with a Dockerfile — the key instructions, how layer caching works, COPY vs ADD, and CMD vs ENTRYPOINT.
+---
+
+# Writing a Dockerfile
+
+## What you'll learn
+- The essential Dockerfile instructions
+- How **layer caching** works and how to order instructions to exploit it
+- `COPY` vs `ADD`, `CMD` vs `ENTRYPOINT`
+- How to build and tag your image
+
+A **Dockerfile** is the recipe for an image. `docker build` reads it top to bottom, running
+each instruction and producing a cached layer.
+
+---
+
+## A first Dockerfile
+```dockerfile
+# Start from a base image (the foundation layer)
+FROM node:20-alpine
+
+# Set the working directory inside the image
+WORKDIR /app
+
+# Copy dependency manifests first (see caching note below)
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy the rest of the source
+COPY . .
+
+# Document the port the app listens on
+EXPOSE 3000
+
+# The command that runs when a container starts
+CMD ["node", "app.js"]
+```
+
+Build and run it:
+```bash
+docker build -t myapp .          # "." = build context (this directory)
+docker run -p 3000:3000 myapp
+```
+
+---
+
+## The essential instructions
+| Instruction | Purpose |
+|-------------|---------|
+| `FROM` | Base image to build on |
+| `WORKDIR` | Set/create the working directory |
+| `COPY` | Copy files from the build context into the image |
+| `ADD` | Like COPY, plus URL download & tar auto-extract |
+| `RUN` | Execute a command at **build** time (creates a layer) |
+| `ENV` | Set an environment variable |
+| `ARG` | Build-time variable (not present at runtime) |
+| `EXPOSE` | Document a port (doesn't publish it — `-p` does) |
+| `CMD` | Default command at **run** time |
+| `ENTRYPOINT` | The executable; CMD becomes its args |
+| `USER` | Switch to a non-root user |
+| `HEALTHCHECK` | How Docker tests the container is healthy |
+
+---
+
+## Layer caching — the most important concept
+Each instruction produces a cached layer. On rebuild, Docker reuses cached layers **until**
+it hits an instruction whose inputs changed — then it rebuilds that layer and everything
+after it.
+
+**Consequence:** order instructions from *least* to *most* frequently changing. Your source
+code changes constantly; your dependencies rarely. So copy and install dependencies
+**before** copying source:
+
+```dockerfile
+COPY package*.json ./     # changes rarely
+RUN npm install           # ← stays cached as long as package*.json is unchanged
+COPY . .                  # changes every commit (only this layer rebuilds)
+```
+
+If you instead did `COPY . .` before `npm install`, every code change would bust the cache
+and reinstall all dependencies — slow builds. This ordering trick saves minutes per build.
+
+---
+
+## COPY vs ADD
+- **`COPY`** — straightforward copy from build context. **Prefer this.**
+- **`ADD`** — also fetches remote URLs and auto-extracts local tar archives. The magic is
+  surprising; only use it when you specifically need extraction.
+
+```dockerfile
+COPY ./src /app/src              # ✅ clear
+ADD https://example.com/x.tar /  # ⚠️ only when you need ADD's extras
+```
+
+---
+
+## CMD vs ENTRYPOINT
+Both define what runs when the container starts, but differ in intent:
+
+- **`CMD`** — the *default* command; easily overridden at `docker run`.
+- **`ENTRYPOINT`** — the fixed executable; `CMD` (or run args) become its arguments.
+
+```dockerfile
+# CMD only — override by passing a command:
+CMD ["node", "app.js"]
+# docker run myapp            -> node app.js
+# docker run myapp npm test   -> npm test (CMD replaced)
+
+# ENTRYPOINT + CMD — fixed program, default args:
+ENTRYPOINT ["node"]
+CMD ["app.js"]
+# docker run myapp            -> node app.js
+# docker run myapp server.js  -> node server.js (only the arg changed)
+```
+
+Use the **exec form** (`["node", "app.js"]`, a JSON array) rather than the shell form
+(`node app.js`) so signals like `SIGTERM` reach your process for graceful shutdown.
+
+---
+
+## ENV and ARG
+```dockerfile
+ARG NODE_ENV=production      # available only during build
+ENV NODE_ENV=$NODE_ENV       # baked into the image, present at runtime
+ENV PORT=3000
+```
+Pass build args with `docker build --build-arg NODE_ENV=development .`.
+
+---
+
+## Common pitfalls
+- ❌ `COPY . .` before installing deps → cache busts on every code change.
+- ❌ Shell-form `CMD node app.js` → signals don't reach Node; slow/abrupt shutdowns.
+- ❌ Using `ADD` for plain copies → surprising behavior; use `COPY`.
+- ❌ Forgetting a `.dockerignore` → `node_modules` and secrets bloat the image
+  (see [Lesson 04](./04-dockerize-node-app.mdx)).
+- ❌ Putting secrets in `ENV`/`ARG` → they're baked into image layers and visible.
+
+## Best practices
+- ✅ Order instructions least→most frequently changing for cache hits.
+- ✅ Prefer `COPY`; use exec-form `CMD`/`ENTRYPOINT`.
+- ✅ Pin a specific base tag (`node:20-alpine`).
+- ✅ Combine related `RUN` steps with `&&` to reduce layers, and clean up in the same layer.
+
+## Try it yourself
+1. Write the Dockerfile above for a tiny `app.js` that prints "hello from docker".
+2. Build it, then change `app.js` and rebuild — watch which layers are `CACHED`.
+3. Now move `COPY . .` above `RUN npm install`, rebuild after a code change, and observe
+   that dependencies reinstall. Put it back the right way.
+
+➡️ Next: [Dockerize a Node App](./04-dockerize-node-app.mdx)

@@ -1,0 +1,145 @@
+---
+title: Build & Publish Docker Images
+order: 6
+description: Build the Docker image from the Docker course inside CI and push it to a registry (GHCR) with sensible tags and build caching.
+---
+
+# Building & Publishing Docker Images in CI
+
+## What you'll learn
+- Building a Docker image inside a GitHub Actions workflow
+- Pushing to **GHCR** (GitHub Container Registry)
+- **Tagging** strategies for traceable releases
+- **Build caching** to keep image builds fast
+
+This ties the [Docker course](../docker/README.md) to CI/CD: CI produces the exact image
+that gets deployed.
+
+---
+
+## The standard build-and-push workflow
+```yaml
+name: Publish image
+on:
+  push:
+    branches: [main]
+    tags: ['v*']                 # also build on version tags
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # e.g. acme/myapp
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write            # allow pushing to GHCR with GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3   # enables advanced build + caching
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # built-in token, no setup needed
+
+      - name: Compute tags & labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch       # branch name
+            type=sha                    # git SHA (immutable, traceable)
+            type=semver,pattern={{version}}   # from v1.2.3 tags
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha          # restore build cache from Actions cache
+          cache-to: type=gha,mode=max   # save build cache for next time
+```
+
+Push to `main` and the image appears under your repo's **Packages**.
+
+---
+
+## Why each piece matters
+- **`docker/setup-buildx-action`** — enables BuildKit/Buildx for layer caching and advanced
+  features.
+- **`docker/login-action`** — authenticates to the registry. For GHCR you can use the
+  built-in `GITHUB_TOKEN` (with `packages: write`) — no extra secret needed. For Docker Hub,
+  use a `DOCKERHUB_USERNAME` variable + `DOCKERHUB_TOKEN` secret.
+- **`docker/metadata-action`** — generates a sensible set of tags and OCI labels from git
+  context, so you don't hand-write tag logic.
+- **`docker/build-push-action`** — builds (using your [Dockerfile](../docker/04-dockerize-node-app.mdx))
+  and pushes in one step.
+
+---
+
+## Tagging strategy
+Deploy by an **immutable** tag, never by `latest`:
+- `type=sha` → `myapp:sha-ab12cd` — uniquely identifies the exact commit. Use this to
+  deploy and to roll back.
+- `type=semver` → `myapp:1.4.2` from a `v1.4.2` git tag — human-friendly releases.
+- `latest` → a convenience pointer to the newest default-branch build; fine for `docker
+  pull` demos, **not** for production deploys.
+
+> Rule: **build once, deploy that exact image.** The SHA/semver tag is the contract between
+> CI and your deploy step.
+
+---
+
+## Build caching
+Rebuilding all image layers every run is slow. `cache-from`/`cache-to: type=gha` stores
+layer cache in the GitHub Actions cache, so unchanged layers (base image, `npm ci`) are
+reused across runs — often cutting build time dramatically. Combined with the
+cache-friendly Dockerfile ordering from the
+[Docker course](../docker/03-dockerfile.mdx#layer-caching), builds stay fast.
+
+---
+
+## Scanning the image (optional, recommended)
+Fail the build if the image has known vulnerabilities:
+```yaml
+      - name: Scan image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          exit-code: '1'              # fail on findings
+          severity: 'CRITICAL,HIGH'
+```
+
+The complete workflow is in [`examples/docker-publish.yml`](./examples/docker-publish.yml).
+
+---
+
+## Common pitfalls
+- ❌ Forgetting `permissions: packages: write` → GHCR push fails with 403.
+- ❌ Deploying by `latest` → you can't tell what's running or roll back cleanly.
+- ❌ No build cache → slow, expensive builds every run.
+- ❌ Logging into Docker Hub with a password instead of an access token.
+
+## Best practices
+- ✅ Tag with the **git SHA** (and semver on releases); deploy by that immutable tag.
+- ✅ Use `GITHUB_TOKEN` + `packages: write` for GHCR — no extra secret.
+- ✅ Enable `type=gha` build cache.
+- ✅ Scan images in the pipeline before they can be deployed.
+
+## Try it yourself
+1. Add this workflow to the repo containing the [Docker example](../docker/examples), push
+   to `main`, and find the image under the repo's **Packages**.
+2. `docker pull ghcr.io/<you>/<repo>:latest` locally and run it.
+3. Push a `v0.1.0` tag and confirm a `0.1.0` image tag is produced by `metadata-action`.
+
+➡️ Next: [CD: Deploy](./07-cd-deploy.mdx)

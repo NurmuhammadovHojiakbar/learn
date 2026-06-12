@@ -1,0 +1,157 @@
+---
+title: Production & Orchestration
+order: 8
+description: Run containers in production — registries, resource limits, logging, restart policies, and an introduction to orchestration with Kubernetes and Swarm.
+---
+
+# Production & Orchestration
+
+## What you'll learn
+- Getting images to production via **registries**
+- **Resource limits**, restart policies, and logging
+- What **orchestration** is and why you need it at scale
+- A first look at **Kubernetes** and **Docker Swarm** — and when to use what
+
+---
+
+## From laptop to production: registries
+You build an image locally or in CI, push it to a **registry**, and production pulls it.
+
+```bash
+# Tag for a registry (GHCR shown), then push
+docker build -t ghcr.io/acme/myapp:1.4.2 .
+docker login ghcr.io
+docker push ghcr.io/acme/myapp:1.4.2
+
+# On the server / in your orchestrator
+docker pull ghcr.io/acme/myapp:1.4.2
+docker run -d -p 80:3000 ghcr.io/acme/myapp:1.4.2
+```
+In practice **CI/CD** builds and pushes for you on every release — see the
+[CI/CD course](../ci-cd/06-docker-build-and-publish.mdx).
+
+---
+
+## Running responsibly in production
+
+**Resource limits** — stop one container from starving the host:
+```bash
+docker run -d --memory=512m --cpus=1.0 --name api myapp
+```
+
+**Restart policies** — recover from crashes/reboots:
+```bash
+docker run -d --restart=unless-stopped myapp
+# no | on-failure[:max] | always | unless-stopped
+```
+
+**Logging** — containers log to stdout/stderr; Docker collects it. Configure rotation so
+logs don't fill the disk:
+```json
+// /etc/docker/daemon.json
+{ "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "3" } }
+```
+Ship logs to a central system (Loki, ELK, CloudWatch) in real deployments.
+
+**Healthchecks** — `HEALTHCHECK` (Dockerfile) or `healthcheck:` (Compose) let the platform
+restart or stop routing to unhealthy containers.
+
+---
+
+## Why orchestration?
+Running `docker run` by hand is fine for one box. Real systems need:
+- **Scaling** — run N replicas and load-balance across them.
+- **Self-healing** — restart/replace failed containers and reschedule off dead nodes.
+- **Rolling updates & rollbacks** — deploy new versions with zero downtime.
+- **Service discovery & load balancing** — across many hosts.
+- **Secrets/config management** and **autoscaling**.
+
+An **orchestrator** automates all of this across a cluster of machines.
+
+---
+
+## Kubernetes (the standard)
+**Kubernetes (K8s)** is the dominant orchestrator. Core objects:
+- **Pod** — one or more containers scheduled together (smallest deployable unit).
+- **Deployment** — declares desired replicas and handles rolling updates/self-healing.
+- **Service** — stable network endpoint + load balancing across pods.
+- **Ingress** — HTTP routing from outside the cluster.
+- **ConfigMap / Secret** — config and secrets.
+
+A minimal Deployment:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: myapp }
+  template:
+    metadata:
+      labels: { app: myapp }
+    spec:
+      containers:
+        - name: myapp
+          image: ghcr.io/acme/myapp:1.4.2
+          ports:
+            - containerPort: 3000
+          resources:
+            limits: { memory: "512Mi", cpu: "500m" }
+```
+You declare the **desired state**; Kubernetes continuously works to match it. It's powerful
+but has a real learning curve and operational cost — managed offerings (EKS, GKE, AKS)
+remove much of the ops burden.
+
+---
+
+## Docker Swarm (simpler)
+Docker's built-in orchestrator. Far less powerful than K8s, but easy if you already know
+Compose — it reuses the same file format.
+
+```bash
+docker swarm init
+docker stack deploy -c compose.yaml myapp
+docker service ls
+docker service scale myapp_api=5
+```
+Good for small clusters and teams who want orchestration without K8s complexity.
+
+---
+
+## Which should I use?
+| Situation | Reach for |
+|-----------|-----------|
+| Single app on one server | `docker run`/Compose + restart policy |
+| A few services, small team, low complexity | Docker Compose or **Swarm** |
+| Scaling, many services, multiple teams/nodes | **Kubernetes** (ideally managed) |
+| Don't want to manage servers at all | PaaS (Fly.io, Render, Cloud Run, ECS/Fargate) — run your image, they orchestrate |
+
+> **Don't over-engineer.** Most small apps run perfectly on a single host with Compose +
+> a restart policy + backups, or on a managed PaaS that takes your image directly. Adopt
+> Kubernetes when scale or org complexity genuinely demands it.
+
+---
+
+## Common pitfalls
+- ❌ No resource limits → one container OOMs the whole host.
+- ❌ No log rotation → disk fills with logs.
+- ❌ Jumping to Kubernetes for a tiny app → huge operational overhead for no benefit.
+- ❌ Deploying by `latest` tag → can't tell what's actually running or roll back cleanly.
+
+## Best practices
+- ✅ Push immutable, versioned images to a registry; deploy by that tag.
+- ✅ Set memory/CPU limits, a restart policy, and log rotation.
+- ✅ Healthchecks everywhere so the platform can self-heal.
+- ✅ Match the tool to the scale — Compose/PaaS first, Kubernetes when justified.
+
+## Try it yourself
+1. Run your image with `--memory=256m --restart=unless-stopped`, then `docker stats` to
+   watch its resource use.
+2. Kill the container process and confirm the restart policy brings it back.
+3. (Optional) `docker swarm init` and `docker stack deploy` your Compose stack; scale a
+   service to 3 replicas with `docker service scale`.
+
+🎉 **You've completed the Docker course.** Next, automate building, testing, and shipping
+these images with the [CI/CD course](../ci-cd/README.md).

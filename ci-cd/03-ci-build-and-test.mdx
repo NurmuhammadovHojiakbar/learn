@@ -1,0 +1,157 @@
+---
+title: "CI: Build & Test"
+order: 3
+description: Build a real CI job for a Node app — checkout, setup-node, install, lint, test, dependency caching, and PR status checks.
+---
+
+# CI: Build & Test a Node App
+
+## What you'll learn
+- A complete, practical CI job for Node.js
+- Caching dependencies to speed up runs
+- Running lint, tests, and build steps
+- Turning CI into a **required status check** on pull requests
+
+---
+
+## A complete CI workflow
+```yaml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm                 # built-in dependency caching (see below)
+
+      - name: Install dependencies
+        run: npm ci                  # clean, reproducible install from package-lock.json
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build --if-present
+```
+
+That's a genuinely production-worthy CI job. Let's unpack the important parts.
+
+---
+
+## `npm ci` vs `npm install`
+In CI, always use **`npm ci`**:
+- Installs **exactly** what's in `package-lock.json` (reproducible).
+- Fails if `package.json` and the lockfile disagree (catches drift).
+- Deletes `node_modules` first for a clean slate.
+
+`npm install` can silently update the lockfile — not what you want in CI.
+
+> `--if-present` makes a step a no-op if that npm script doesn't exist, so the same workflow
+> works across repos that may or may not define `lint`/`build`.
+
+---
+
+## Caching dependencies
+Re-downloading all dependencies every run is slow. `actions/setup-node` has built-in
+caching — just add `cache: npm`:
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: 20
+    cache: npm            # caches the npm download cache, keyed on package-lock.json
+```
+It restores the cache when the lockfile is unchanged and updates it when deps change. (Use
+`cache: yarn` or `cache: pnpm` for those package managers.)
+
+For finer control you can use `actions/cache` directly, but `setup-node`'s built-in caching
+covers most needs.
+
+---
+
+## Test reports & coverage (optional)
+```yaml
+- name: Test with coverage
+  run: npm test -- --coverage
+
+- name: Upload coverage artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: coverage
+    path: coverage/
+```
+Artifacts are downloadable from the run's summary page — handy for coverage reports,
+build outputs, or logs.
+
+---
+
+## Splitting into parallel jobs
+Lint and test don't depend on each other, so run them in parallel for faster feedback:
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm test
+```
+Both jobs start at once; the PR shows two separate checks.
+
+---
+
+## Make CI a required check (branch protection)
+A green pipeline only protects you if a red one **blocks merging**. On GitHub:
+
+**Repo → Settings → Branches → Add branch protection rule** for `main`:
+- ✅ *Require status checks to pass before merging* → select your CI jobs.
+- ✅ *Require a pull request before merging*.
+
+Now a PR with failing tests literally cannot be merged. This is what keeps `main` green.
+
+---
+
+## Common pitfalls
+- ❌ `npm install` in CI → non-reproducible builds, lockfile drift unnoticed.
+- ❌ No caching → every run re-downloads everything (slow, costly).
+- ❌ Tests pass in CI but you never made the check **required** → people merge red PRs.
+- ❌ Committing without a `package-lock.json` → `npm ci` fails.
+
+## Best practices
+- ✅ `npm ci` + `cache: npm` for fast, reproducible installs.
+- ✅ Run lint and tests on every push and PR.
+- ✅ Parallelize independent jobs for faster feedback.
+- ✅ Require CI checks in branch protection; keep `main` always green.
+
+## Try it yourself
+1. Add the CI workflow to a Node repo with a `test` script and push a PR — watch the check
+   run.
+2. Add `cache: npm` and compare run times before/after on a second push.
+3. Enable branch protection requiring the CI check, then open a PR that breaks a test and
+   confirm GitHub blocks the merge.
+
+➡️ Next: [Matrix & Service Containers](./04-matrix-and-services.mdx)

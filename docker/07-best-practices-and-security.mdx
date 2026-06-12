@@ -1,0 +1,148 @@
+---
+title: Best Practices & Security
+order: 7
+description: Make images small, builds fast, and containers safe — layer caching, multi-stage, non-root, secrets handling, and image scanning.
+---
+
+# Best Practices & Security
+
+## What you'll learn
+- Keeping images **small** and builds **fast**
+- Handling **secrets** correctly
+- Reducing the attack surface (non-root, minimal base, pinned versions)
+- **Scanning** images for vulnerabilities
+
+These habits compound: smaller images push/pull faster, start quicker, and have less to
+exploit.
+
+---
+
+## Smaller & faster images
+
+**1. Pick a minimal base.** `alpine` or `slim` over the full image; `distroless` for an
+even smaller, shell-less runtime.
+
+**2. Multi-stage builds** (see [Lesson 04](./04-dockerize-node-app.mdx)) — keep build tools
+out of the final image.
+
+**3. Exploit layer caching** — copy `package*.json` and install **before** copying source,
+so dependency layers stay cached across code changes.
+
+**4. A thorough `.dockerignore`** — don't ship `node_modules`, `.git`, `.env`, tests, docs.
+
+**5. Combine and clean up in one `RUN`** — files deleted in a *later* layer still occupy
+space in the earlier one:
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*      # cleanup in the SAME layer
+```
+
+**6. Install only production deps** — `npm ci --omit=dev`.
+
+---
+
+## Secrets — what NOT to do
+Secrets baked into an image are **permanent and visible** — anyone with the image can run
+`docker history` / extract layers and read them.
+
+```dockerfile
+# ❌ NEVER do this
+ENV API_KEY=sk-supersecret
+COPY .env .                    # ❌ secret in a layer forever
+```
+
+**Do instead:**
+- **Runtime env vars:** `docker run -e API_KEY=... ` or Compose `env_file:` (gitignored).
+- **Docker secrets / orchestrator secrets** for Swarm/Kubernetes.
+- **BuildKit build secrets** when a secret is only needed *during* build — it isn't stored
+  in any layer:
+  ```dockerfile
+  # syntax=docker/dockerfile:1
+  RUN --mount=type=secret,id=npmtoken \
+      NPM_TOKEN=$(cat /run/secrets/npmtoken) npm ci
+  ```
+  ```bash
+  docker build --secret id=npmtoken,src=./.npmtoken .
+  ```
+
+---
+
+## Reduce the attack surface
+- **Run as non-root** — `USER node` (or create a dedicated user). A container breakout as
+  root is far worse than as an unprivileged user.
+- **Pin versions** — `node:20.11-alpine`, not `node:latest`. Reproducible and auditable.
+- **Drop capabilities & avoid `--privileged`** — grant only what's needed:
+  ```bash
+  docker run --cap-drop ALL --cap-add NET_BIND_SERVICE myapp
+  docker run --read-only myapp          # read-only root filesystem
+  ```
+- **Don't mount the Docker socket** (`/var/run/docker.sock`) into containers unless you
+  fully trust them — it's root-equivalent on the host.
+- **Keep base images updated** — rebuild regularly to pull in security patches.
+
+---
+
+## Scan your images
+Catch known CVEs before shipping:
+```bash
+docker scout cves myapp:latest        # built into Docker Desktop
+# or
+trivy image myapp:latest              # popular open-source scanner
+```
+Wire a scan into CI so vulnerable images fail the build — see the
+[CI/CD course](../ci-cd/06-docker-build-and-publish.mdx).
+
+---
+
+## Tagging strategy
+- Tag with the **version/commit** (`myapp:1.4.2`, `myapp:sha-ab12cd`) for traceable,
+  immutable deploys.
+- Move a `latest` (or `stable`) tag as a convenience pointer, but **deploy by immutable
+  tag**, never by `latest`.
+- In CI, tag with the git SHA so every build is uniquely identifiable.
+
+---
+
+## A solid production Dockerfile (recap)
+```dockerfile
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=builder /app .
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "app.js"]
+```
+
+---
+
+## Common pitfalls
+- ❌ Secrets in `ENV`/`COPY` → permanently embedded in image layers.
+- ❌ `node:latest` / unpinned bases → unreproducible, surprise breakage.
+- ❌ Running as root / `--privileged` / mounting the Docker socket carelessly.
+- ❌ Never scanning images → shipping known CVEs.
+- ❌ Fat images full of build tools and dev deps.
+
+## Best practices
+- ✅ Multi-stage + minimal base + `--omit=dev` + `.dockerignore`.
+- ✅ Non-root user, pinned versions, dropped capabilities.
+- ✅ Inject secrets at runtime or via BuildKit secrets — never bake them.
+- ✅ Scan images in CI and deploy by immutable tag.
+
+## Try it yourself
+1. Run `docker scout cves` (or `trivy image`) on your Node image and read the findings.
+2. Add a BuildKit secret to your build and confirm with `docker history` that it's **not**
+   in any layer.
+3. Compare `docker images` sizes: full `node:20` single-stage vs the multi-stage alpine
+   image above.
+
+➡️ Next: [Production & Orchestration](./08-production-and-orchestration.mdx)

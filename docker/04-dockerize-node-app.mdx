@@ -1,0 +1,179 @@
+---
+title: Dockerize a Node App
+order: 4
+description: Containerize a real Node.js app the right way — .dockerignore, multi-stage builds, small base images, non-root user, and graceful shutdown.
+---
+
+# Dockerizing a Node.js App
+
+## What you'll learn
+- Writing a `.dockerignore`
+- **Multi-stage builds** for small, production-only images
+- Choosing a base image (`alpine` / `slim`)
+- Running as a **non-root** user
+- Handling signals for graceful shutdown
+
+We'll containerize a small Express app. The full runnable version lives in
+[`examples/`](./examples).
+
+---
+
+## The app
+```js
+// app.js
+import express from 'express';
+const app = express();
+
+app.get('/', (req, res) => res.json({ message: 'Hello from Docker!' }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+const server = app.listen(3000, () => console.log('listening on :3000'));
+
+// Graceful shutdown so `docker stop` exits cleanly
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+```
+
+---
+
+## Step 1: `.dockerignore`
+Just like `.gitignore`, this keeps junk out of the build context — smaller, faster builds
+and no leaked secrets.
+
+```gitignore
+node_modules
+npm-debug.log
+.git
+.env
+Dockerfile
+.dockerignore
+*.md
+coverage
+```
+> Excluding `node_modules` is important: you want dependencies installed **inside** the
+> image for the right architecture, not copied from your host.
+
+---
+
+## Step 2: A naive Dockerfile (and why to improve it)
+```dockerfile
+FROM node:20
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD ["node", "app.js"]
+```
+This works but the image is **~1 GB** (full Node image), runs as **root**, and ships dev
+dependencies. Let's fix all three.
+
+---
+
+## Step 3: Smaller base image
+`node:20` is huge. `node:20-alpine` (Alpine Linux) is a fraction of the size.
+
+| Base | Approx size |
+|------|-------------|
+| `node:20` | ~1 GB |
+| `node:20-slim` | ~240 MB |
+| `node:20-alpine` | ~140 MB |
+
+Alpine is smallest; `slim` is a good middle ground if you hit musl-libc compatibility
+issues with native modules.
+
+---
+
+## Step 4: Multi-stage build
+A **multi-stage build** uses one stage to install/build and a second, clean stage that
+copies only what's needed to run. Build tools and dev dependencies never reach the final
+image.
+
+```dockerfile
+# ---- Stage 1: build / install deps ----
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci                      # reproducible install from package-lock.json
+COPY . .
+# (if you had a build step: RUN npm run build)
+
+# ---- Stage 2: production runtime ----
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Install ONLY production deps
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Copy app source from the builder stage
+COPY --from=builder /app .
+
+# Run as a non-root user (node:alpine ships an unprivileged "node" user)
+USER node
+
+EXPOSE 3000
+CMD ["node", "app.js"]
+```
+
+Key wins:
+- `npm ci` (not `npm install`) → reproducible builds from the lockfile, fails if it drifts.
+- `--omit=dev` → no test/lint/build tooling in the final image.
+- `USER node` → if the app is compromised, the attacker isn't root.
+
+---
+
+## Step 5: Healthcheck (optional but recommended)
+Lets Docker/orchestrators know if your app is actually serving:
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+```
+
+---
+
+## Build & run
+```bash
+docker build -t node-demo .
+docker run -p 3000:3000 --name demo node-demo
+curl localhost:3000          # {"message":"Hello from Docker!"}
+docker stop demo             # SIGTERM → graceful shutdown
+```
+
+Check the size you achieved:
+```bash
+docker images node-demo
+```
+
+---
+
+## Why non-root and signals matter
+- **Non-root:** containers share the host kernel. A root process that escapes the container
+  is root on concepts close to the host. Drop privileges with `USER`.
+- **Signals:** `docker stop` sends `SIGTERM`, then `SIGKILL` after a grace period. With
+  exec-form `CMD ["node","app.js"]`, Node receives `SIGTERM` and can close connections
+  cleanly. Shell-form swallows the signal.
+
+---
+
+## Common pitfalls
+- ❌ No `.dockerignore` → bloated context, leaked `.env`, host `node_modules` copied in.
+- ❌ Using the full `node:20` base → 1 GB images.
+- ❌ `npm install` instead of `npm ci` in CI/images → non-reproducible builds.
+- ❌ Shipping dev dependencies → bigger image, larger attack surface.
+- ❌ Running as root by default.
+
+## Best practices
+- ✅ Multi-stage build + `alpine`/`slim` base + `--omit=dev`.
+- ✅ `npm ci` from a committed `package-lock.json`.
+- ✅ `USER node` (non-root) and exec-form `CMD`.
+- ✅ A `/health` endpoint + `HEALTHCHECK`.
+- ✅ A thorough `.dockerignore`.
+
+## Try it yourself
+1. Build the multi-stage image from [`examples/`](./examples) and compare its size to a
+   single-stage `node:20` build (`docker images`).
+2. `docker exec -it demo whoami` → should print `node`, not `root`.
+3. Run `docker stop demo` and confirm in the logs that the server closed gracefully.
+
+➡️ Next: [Volumes & Networking](./05-volumes-and-networking.mdx)

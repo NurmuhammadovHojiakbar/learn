@@ -1,0 +1,166 @@
+---
+title: GitHub Actions Basics
+order: 2
+description: The building blocks of GitHub Actions — workflows, jobs, steps, runners, events/triggers — and the anatomy of a workflow file.
+---
+
+# GitHub Actions Basics
+
+## What you'll learn
+- The hierarchy: **workflow → job → step**
+- **Runners** (where jobs execute)
+- **Events** that trigger workflows
+- How to read and write a workflow YAML file
+
+---
+
+## The vocabulary
+```
+ Workflow (.github/workflows/ci.yml)
+   ├─ triggered by an Event (push, pull_request, ...)
+   └─ Job(s)            ← run on a Runner (a VM), jobs run in parallel by default
+        └─ Step(s)      ← run sequentially within a job
+             ├─ uses: an Action (reusable unit, e.g. actions/checkout)
+             └─ run:  a shell command
+```
+
+- **Workflow** — a YAML file in `.github/workflows/`. A repo can have many.
+- **Event** — what triggers it (a push, a PR, a tag, a schedule, a manual click).
+- **Job** — a set of steps that run together on one **runner**. Jobs run in **parallel**
+  unless you declare dependencies.
+- **Step** — a single task: either `run` (a shell command) or `uses` (an **Action**).
+- **Action** — a packaged, reusable step (e.g. `actions/checkout@v4`).
+- **Runner** — the machine executing a job (GitHub-hosted `ubuntu-latest`, or self-hosted).
+
+---
+
+## Anatomy of a workflow
+```yaml
+name: CI                       # display name in the Actions tab
+
+on:                            # WHEN to run (the event triggers)
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:                          # WHAT to run
+  build:                       # job id
+    runs-on: ubuntu-latest     # the runner
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4        # an Action
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:                            # inputs to the action
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci                      # a shell command
+
+      - name: Run tests
+        run: npm test
+```
+
+Commit this to `.github/workflows/ci.yml`, push, and it runs automatically. Watch it in the
+repo's **Actions** tab.
+
+---
+
+## Events / triggers (`on:`)
+```yaml
+on:
+  push:
+    branches: [main]
+    paths: ['src/**']            # only when matching files change
+  pull_request:                  # on PRs targeting the repo
+  workflow_dispatch:             # a manual "Run workflow" button
+  schedule:
+    - cron: '0 2 * * *'          # every day at 02:00 UTC
+  release:
+    types: [published]           # when a GitHub release is published
+  push:
+    tags: ['v*']                 # when a version tag is pushed
+```
+`workflow_dispatch` is great for deploy buttons; `schedule` for nightly jobs.
+
+---
+
+## Runners
+```yaml
+runs-on: ubuntu-latest     # most common, fastest, cheapest
+# runs-on: windows-latest
+# runs-on: macos-latest    # for iOS/macOS builds
+# runs-on: self-hosted     # your own machine/cluster
+```
+GitHub-hosted runners are fresh VMs per job with common tools preinstalled. They're free
+for public repos and metered for private ones.
+
+---
+
+## Steps: `run` vs `uses`
+```yaml
+steps:
+  # uses: pull in a reusable Action from the marketplace or a repo
+  - uses: actions/checkout@v4         # ALWAYS pin a version (@v4 or a SHA)
+
+  # run: execute shell commands on the runner
+  - name: Build
+    run: |
+      npm ci
+      npm run build
+    working-directory: ./app          # optional: where to run
+    env:
+      NODE_ENV: production             # step-level env var
+```
+
+---
+
+## Variables, contexts & expressions
+GitHub injects **contexts** you reference with `${{ }}`:
+```yaml
+- run: echo "Commit ${{ github.sha }} on ${{ github.ref }}"
+- run: echo "Triggered by ${{ github.event_name }}"
+- if: ${{ github.ref == 'refs/heads/main' }}    # conditional step
+  run: echo "this only runs on main"
+```
+Common contexts: `github` (event/repo info), `env`, `secrets`, `vars`, `job`, `matrix`.
+
+---
+
+## Job dependencies & outputs
+By default jobs run in parallel. Chain them with `needs`:
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [ ... ]
+  deploy:
+    needs: test                # only runs if "test" succeeded
+    runs-on: ubuntu-latest
+    steps: [ ... ]
+```
+
+---
+
+## Common pitfalls
+- ❌ Wrong file location — workflows **must** live in `.github/workflows/` at the repo root.
+- ❌ Unpinned actions (`actions/checkout` with no `@version`) — pin `@v4` (or a SHA) for
+  stability/security.
+- ❌ Expecting jobs to share a filesystem — each job is a **fresh** runner; pass data via
+  artifacts or outputs.
+- ❌ YAML indentation mistakes — Actions YAML is whitespace-sensitive.
+
+## Best practices
+- ✅ One clear workflow per purpose (CI, publish, deploy).
+- ✅ Pin action versions; name your steps for readable logs.
+- ✅ Use `workflow_dispatch` for manual runs and `paths:` filters to avoid wasted runs.
+- ✅ Keep secrets in `secrets`, never inline (next lessons).
+
+## Try it yourself
+1. Add the workflow above to a test repo and push — open the **Actions** tab and watch it.
+2. Add a `workflow_dispatch:` trigger and run it manually from the UI.
+3. Add a second job `lint` that `needs: build`, and confirm it only starts after build
+   passes.
+
+➡️ Next: [CI: Build & Test](./03-ci-build-and-test.mdx)

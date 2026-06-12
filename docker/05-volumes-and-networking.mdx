@@ -1,0 +1,142 @@
+---
+title: Volumes & Networking
+order: 5
+description: Persist data with volumes and bind mounts, and let containers talk to each other and the outside world.
+---
+
+# Volumes & Networking
+
+## What you'll learn
+- Why container data disappears, and how **volumes** fix it
+- **Named volumes** vs **bind mounts** — when to use each
+- Publishing ports to the host
+- Container-to-container communication over **networks** (with built-in DNS)
+
+---
+
+## The problem: containers are ephemeral
+A container's writable layer is deleted when the container is removed. Write a database
+file inside a container, `docker rm` it, and the data is **gone**. For anything that must
+survive, you need storage that lives outside the container: a **volume** or **bind mount**.
+
+---
+
+## Named volumes
+Docker manages these in its own storage area. Best choice for **persistent app data**
+(databases, uploads).
+
+```bash
+docker volume create mydata
+docker run -d --name db -v mydata:/var/lib/postgresql/data postgres
+
+# the data survives removing & recreating the container
+docker rm -f db
+docker run -d --name db -v mydata:/var/lib/postgresql/data postgres  # data still there
+
+docker volume ls
+docker volume inspect mydata
+docker volume rm mydata        # delete (data lost)
+```
+
+---
+
+## Bind mounts
+Map a **host directory** straight into the container. Perfect for **development** — edit
+code on your host and the container sees changes instantly.
+
+```bash
+# Mount the current directory into /app (live code editing)
+docker run -d -p 3000:3000 -v "$(pwd)":/app node-demo
+```
+
+| | Named volume | Bind mount |
+|--|--------------|------------|
+| Managed by | Docker | You (a host path) |
+| Best for | Persistent data (DBs) | Local dev / live code |
+| Portability | High | Tied to host path |
+
+> A common dev trick: bind-mount your source for hot reload, but keep `node_modules` in an
+> anonymous volume so the host's modules don't clobber the container's:
+> `-v "$(pwd)":/app -v /app/node_modules`.
+
+---
+
+## tmpfs (in-memory)
+For sensitive or throwaway data that should never touch disk:
+```bash
+docker run --tmpfs /tmp myapp
+```
+
+---
+
+## Networking: publishing ports
+By default a container's ports are private. `-p host:container` publishes one to the host:
+```bash
+docker run -p 8080:80 nginx      # host 8080 -> container 80
+docker run -p 127.0.0.1:80:80 nginx   # bind only to localhost
+```
+`EXPOSE` in a Dockerfile only *documents* a port — `-p` is what actually opens it.
+
+---
+
+## Container-to-container networking
+Containers on the **same user-defined network** can reach each other **by container name**
+— Docker provides built-in DNS. This is how a Node app finds Redis.
+
+```bash
+# 1. Create a network
+docker network create appnet
+
+# 2. Run Redis on it (no need to publish a port for internal-only access)
+docker run -d --name redis --network appnet redis:7
+
+# 3. Run the app on the same network
+docker run -d --name api --network appnet -p 3000:3000 node-demo
+```
+
+Now inside the `api` container, Redis is reachable at the hostname **`redis`**:
+```js
+// in the Node app — host is the CONTAINER NAME, not localhost
+const client = createClient({ url: 'redis://redis:6379' });
+```
+
+> ⚠️ Inside a container, `localhost` means *that container*, not your host or another
+> container. Use the service/container name on a shared network instead.
+
+### Default vs user-defined networks
+- The default `bridge` network does **not** give name-based DNS between containers.
+- A **user-defined** network (`docker network create`) does — always create one for
+  multi-container apps. (Docker Compose does this automatically — next lesson.)
+
+```bash
+docker network ls
+docker network inspect appnet
+docker network connect appnet some-container
+```
+
+---
+
+## Common pitfalls
+- ❌ Expecting data to persist without a volume — it won't.
+- ❌ Using `localhost` to reach another container — use its name on a shared network.
+- ❌ Relying on the default bridge network for service discovery — no DNS; make a
+  user-defined network.
+- ❌ Bind-mounting over `node_modules` and breaking native deps — use an anonymous volume
+  for it.
+
+## Best practices
+- ✅ Named volumes for persistent data; bind mounts for local dev.
+- ✅ One user-defined network per app stack; reference services by name.
+- ✅ Only publish ports you actually need exposed to the host.
+- ✅ Keep secrets out of images; inject via env/secrets at runtime.
+
+## Try it yourself
+1. Create `appnet`, run `redis:7` named `redis` on it, then
+   `docker run -it --network appnet redis:7 redis-cli -h redis ping` → `PONG`. You reached
+   Redis by name.
+2. Run Postgres with a named volume, insert a row, remove and recreate the container,
+   confirm the row survived.
+3. Bind-mount a folder into an nginx container's `/usr/share/nginx/html` and edit a file on
+   the host — refresh the browser to see it change live.
+
+➡️ Next: [Docker Compose](./06-docker-compose.mdx)

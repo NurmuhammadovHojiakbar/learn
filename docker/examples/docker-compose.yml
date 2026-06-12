@@ -1,0 +1,33 @@
+# Node + Redis stack for the Docker course (Lesson 06).
+#   docker compose up -d
+#   curl localhost:3000        -> {"message":"Hello from Docker!","visits":N}
+#   docker compose down        (add -v to also wipe the redis-data volume)
+
+services:
+  api:
+    build:
+      context: ./node-app        # the app source + package.json
+      dockerfile: ../Dockerfile  # reuse the multi-stage Dockerfile one level up
+    ports:
+      - "3000:3000"
+    environment:
+      # "redis" is the service name below — Compose's network resolves it by name.
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    depends_on:
+      redis:
+        condition: service_healthy   # wait until Redis is actually ready
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
