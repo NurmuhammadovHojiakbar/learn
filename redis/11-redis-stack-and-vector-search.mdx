@@ -1,0 +1,214 @@
+---
+title: "Redis Stack & Vector Search"
+order: 11
+description: Go beyond core Redis — secondary indexing and full-text search with RediSearch, document storage with RedisJSON, and using Redis as a vector database for AI / RAG.
+---
+
+# Redis Stack & Vector Search
+
+## What you'll learn
+- What **Redis Stack** adds on top of core Redis
+- Secondary indexing & full-text search with **RediSearch** (`FT.*` commands)
+- Storing and querying documents with **RedisJSON**
+- Using Redis as a **vector database** for semantic search, RAG, and recommendations
+- How to do all of it from Node.js with `node-redis`
+
+So far we've looked up data by key. **Redis Stack** lets you *query* data by its content —
+search text, filter by fields, and find the **nearest vectors** to an embedding. That last
+one makes Redis a popular store for AI applications.
+
+---
+
+## Getting Redis Stack
+The extra capabilities ship as modules. The easiest way to get them all is the
+`redis-stack` image (core Redis + RediSearch + RedisJSON + TimeSeries + Bloom):
+
+```bash
+docker run --name redis-stack -p 6379:6379 -p 8001:8001 -d redis/redis-stack:latest
+```
+Port **8001** serves **RedisInsight**, a web GUI for browsing keys and running queries —
+open http://localhost:8001.
+
+> Managed Redis (Redis Cloud) and Azure/AWS offerings can enable these modules too. Plain
+> open-source `redis:7` does **not** include them.
+
+---
+
+## RedisJSON — store & query documents
+RedisJSON adds a native `JSON` type, so you can store nested objects and update individual
+paths without rewriting the whole document.
+
+```bash
+JSON.SET product:1 $ '{"name":"Keyboard","price":49.99,"tags":["usb","mechanical"]}'
+JSON.GET product:1 $.price            # [49.99]
+JSON.SET product:1 $.price 39.99      # update just one field
+JSON.ARRAPPEND product:1 $.tags '"rgb"'
+```
+
+In Node.js:
+```js
+await client.json.set('product:1', '$', {
+  name: 'Keyboard', price: 49.99, tags: ['usb', 'mechanical'],
+});
+const price = await client.json.get('product:1', { path: '$.price' });
+await client.json.set('product:1', '$.price', 39.99);
+```
+
+---
+
+## RediSearch — secondary indexes & full-text search
+Core Redis can only find data by key. RediSearch lets you build an **index** over fields of
+your hashes or JSON documents, then run rich queries: full-text, numeric ranges, tags,
+geo — and vector similarity.
+
+### 1. Create an index
+You index a **prefix** of keys and declare the schema. Here we index JSON product docs:
+```bash
+FT.CREATE idx:products
+  ON JSON
+  PREFIX 1 product:
+  SCHEMA
+    $.name   AS name   TEXT
+    $.price  AS price  NUMERIC SORTABLE
+    $.tags[*] AS tags  TAG
+```
+(For hashes, use `ON HASH` and field names directly instead of JSONPaths.)
+
+### 2. Query it
+```bash
+# Full-text search on name
+FT.SEARCH idx:products "keyboard"
+
+# Numeric range
+FT.SEARCH idx:products "@price:[0 50]"
+
+# Tag filter + text, sorted by price
+FT.SEARCH idx:products "@tags:{mechanical} keyboard" SORTBY price ASC
+
+# Just count
+FT.SEARCH idx:products "*" LIMIT 0 0
+```
+
+### In Node.js
+```js
+import { SchemaFieldTypes } from 'redis';
+
+await client.ft.create('idx:products', {
+  '$.name':    { type: SchemaFieldTypes.TEXT,    AS: 'name' },
+  '$.price':   { type: SchemaFieldTypes.NUMERIC, AS: 'price', SORTABLE: true },
+  '$.tags[*]': { type: SchemaFieldTypes.TAG,     AS: 'tags' },
+}, { ON: 'JSON', PREFIX: 'product:' });
+
+const res = await client.ft.search('idx:products', '@price:[0 50] keyboard', {
+  SORTBY: { BY: 'price', DIRECTION: 'ASC' },
+});
+console.log(res.total, res.documents);
+```
+
+Indexes update **automatically** as you write matching keys — no reindex step.
+
+---
+
+## Vector search — Redis as a vector database
+Modern AI apps turn text/images into **embeddings** (arrays of floats) so that *semantic*
+similarity becomes *geometric* closeness. RediSearch can index these vectors and answer
+**"find the K nearest neighbors"** queries — the core of semantic search and
+**RAG (Retrieval-Augmented Generation)**.
+
+```
+"How do I cache in Node?"
+        │  embed (LLM/embedding model)
+        ▼
+   [0.12, -0.04, 0.88, ...]   ← query vector
+        │  KNN search in Redis
+        ▼
+   nearest stored chunks → feed as context to an LLM
+```
+
+### 1. Index with a VECTOR field
+Declare dimensions, distance metric, and algorithm (`FLAT` for exact, `HNSW` for fast
+approximate on large datasets):
+```bash
+FT.CREATE idx:docs
+  ON HASH
+  PREFIX 1 doc:
+  SCHEMA
+    content TEXT
+    embedding VECTOR HNSW 6
+      TYPE FLOAT32
+      DIM 1536
+      DISTANCE_METRIC COSINE
+```
+
+### 2. Store vectors
+Embeddings are stored as a packed binary blob (`Float32Array` bytes):
+```js
+function toBytes(vec) { return Buffer.from(new Float32Array(vec).buffer); }
+
+await client.hSet('doc:1', {
+  content: 'Cache-aside loads from DB on a miss and stores the result in Redis.',
+  embedding: toBytes(embeddingFor('caching')),  // your embedding model's output
+});
+```
+
+### 3. KNN query
+```js
+// Find the 3 chunks closest to the query vector
+const queryVec = toBytes(embeddingFor('how to cache data'));
+
+const results = await client.ft.search(
+  'idx:docs',
+  '*=>[KNN 3 @embedding $vec AS score]',
+  {
+    PARAMS: { vec: queryVec },
+    SORTBY: 'score',           // closest first
+    DIALECT: 2,
+    RETURN: ['content', 'score'],
+  }
+);
+for (const doc of results.documents) {
+  console.log(doc.value.score, doc.value.content);
+}
+```
+
+You can combine vector search with normal filters — **hybrid search** — e.g. "nearest
+vectors *where* `@category:{docs}` and `@price:[0 50]`". Just prefix the KNN with a filter
+expression instead of `*`.
+
+> **Generating embeddings:** use an embedding model (e.g. an LLM provider's embeddings
+> endpoint) to turn text into the float arrays. Redis stores and searches them; it doesn't
+> create them. Keep the **same model + DIM** for both indexing and querying.
+
+### Why Redis for vectors?
+- You may already run Redis — one fewer system to operate.
+- Sub-millisecond KNN with HNSW; combine with metadata filters in one query.
+- TTLs work, so you can expire stale embeddings.
+
+For very large corpora or advanced relevance tuning, dedicated vector DBs (or a managed
+Redis with tuned HNSW params) are worth evaluating — but Redis covers a lot of real apps.
+
+---
+
+## Common pitfalls
+- ❌ Using plain `redis:7` and wondering why `FT.CREATE`/`JSON.SET` fail — you need
+  **Redis Stack** (or the modules enabled).
+- ❌ Mismatched embedding `DIM` between index and query vector → errors / no results.
+- ❌ Mixing embedding models between indexing and querying → meaningless distances.
+- ❌ Forgetting `DIALECT 2` for vector/KNN query syntax.
+- ❌ Using `FLAT` on millions of vectors (exact but slow) — use `HNSW` for scale.
+
+## Best practices
+- ✅ Index a clear key **prefix** and let RediSearch update automatically.
+- ✅ Choose the distance metric your model expects (often `COSINE`).
+- ✅ Use `HNSW` for large/approximate, `FLAT` for small/exact.
+- ✅ Combine vector KNN with tag/numeric filters for **hybrid** relevance.
+- ✅ Store the source text alongside the vector so you can return it directly.
+
+## Try it yourself
+1. Start `redis/redis-stack` and open RedisInsight at http://localhost:8001.
+2. Insert a few `product:*` JSON docs, create `idx:products`, and run a `@price` range query.
+3. Run the runnable demo: [`examples/vector-search.js`](./examples/vector-search.js) —
+   it indexes a handful of docs with small fake embeddings and returns the nearest matches
+   to a query (no external API needed).
+
+➡️ Back to the [course index](./README.md).

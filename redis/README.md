@@ -49,6 +49,7 @@ node cache-aside.js
 | 08 | [Persistence & Reliability](./08-persistence-and-reliability.mdx) | RDB, AOF, eviction, memory |
 | 09 | [Scaling Redis](./09-scaling.mdx) | Replication, Sentinel, Cluster |
 | 10 | [Node.js in Production](./10-nodejs-production.mdx) | Sessions, rate limiting, locks, queues, security |
+| 11 | [Redis Stack & Vector Search](./11-redis-stack-and-vector-search.mdx) | RediSearch, RedisJSON, vectors for AI/RAG |
 
 ## Quick reference cheat sheet
 ```bash
