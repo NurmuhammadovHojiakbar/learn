@@ -1,0 +1,148 @@
+---
+title: Persistence & Reliability
+order: 8
+description: How Redis survives restarts — RDB snapshots vs AOF logs — plus eviction policies and memory management.
+---
+
+# Persistence, Eviction & Memory
+
+## What you'll learn
+- How Redis persists in-memory data to disk: **RDB** vs **AOF**
+- Choosing a durability strategy
+- **Eviction policies** — what happens when memory fills up
+- Practical memory management
+
+Redis is in-memory, but it can write to disk so data survives restarts. Understanding the
+trade-offs is essential before using Redis for anything you can't afford to lose.
+
+---
+
+## RDB — point-in-time snapshots
+RDB saves a **compact binary snapshot** of the entire dataset to a `dump.rdb` file at
+intervals.
+
+```conf
+# redis.conf — save a snapshot if:
+save 900 1        # ≥1 key changed in 900s
+save 300 10       # ≥10 keys changed in 300s
+save 60 10000     # ≥10000 keys changed in 60s
+```
+```bash
+SAVE        # synchronous snapshot (blocks — avoid in prod)
+BGSAVE      # background snapshot (forks a child process)
+LASTSAVE    # timestamp of last successful save
+```
+
+**Pros:** compact, fast restarts, great for backups, low runtime overhead (forked child).
+**Cons:** you can lose everything written **since the last snapshot** if Redis crashes.
+
+---
+
+## AOF — Append Only File
+AOF logs **every write command** to a file. On restart, Redis replays the log to rebuild
+the dataset.
+
+```conf
+appendonly yes
+appendfsync everysec     # fsync once per second (recommended balance)
+# appendfsync always     # fsync every write — safest, slowest
+# appendfsync no         # let the OS decide — fastest, least safe
+```
+
+With `everysec` you lose at most ~1 second of writes on a crash. Redis periodically
+**rewrites** the AOF (`BGREWRITEAOF`) to compact it.
+
+**Pros:** much more durable (down to 1s or even 0 loss). **Cons:** larger files, slightly
+slower, longer restarts than RDB.
+
+---
+
+## RDB vs AOF — which to use?
+| | RDB | AOF |
+|--|-----|-----|
+| Durability | minutes of potential loss | ≤1s (with `everysec`) |
+| File size | small | larger |
+| Restart speed | fast | slower (replays log) |
+| Backups | ideal | possible but bulky |
+
+**Recommended default:** enable **both**. RDB gives you fast restarts + easy backups; AOF
+gives you strong durability. On restart Redis uses the AOF (more complete). This is the
+standard production setup.
+
+```conf
+save 900 1
+save 300 10
+appendonly yes
+appendfsync everysec
+```
+
+> Need zero persistence (pure cache)? Set `save ""` and `appendonly no` — Redis runs
+> faster and a restart simply starts empty. Perfectly valid for a cache layer.
+
+---
+
+## Eviction policies — when memory is full
+Set a memory ceiling and tell Redis what to do when it's reached:
+```conf
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+```
+
+| Policy | Behavior |
+|--------|----------|
+| `noeviction` | Reject writes with an error (default) |
+| `allkeys-lru` | Evict least-recently-used key (any key) |
+| `allkeys-lfu` | Evict least-**frequently**-used key |
+| `volatile-lru` | Evict LRU **among keys with a TTL** only |
+| `volatile-ttl` | Evict keys with the nearest expiry first |
+| `allkeys-random` / `volatile-random` | Evict at random |
+
+**Rule of thumb:**
+- Pure cache → `allkeys-lru` (or `allkeys-lfu` for skewed access). Redis self-trims.
+- Mixed cache + must-keep data → `volatile-lru` and set TTLs only on the disposable keys.
+- A primary datastore → `noeviction` (never silently drop data) + monitor memory.
+
+---
+
+## Memory management in practice
+```bash
+INFO memory                  # used_memory, maxmemory, fragmentation
+MEMORY USAGE user:1000       # bytes a key consumes
+MEMORY DOCTOR                # human-readable health advice
+DBSIZE                       # key count
+OBJECT ENCODING user:1000    # internal encoding (small structures are optimized)
+```
+
+Tips to keep memory under control:
+- **Always set TTLs** on cache keys.
+- Prefer **Hashes** over many top-level keys for grouped fields (more memory-efficient
+  with small encodings).
+- Keep values small; compress large blobs in the app if needed.
+- Watch **fragmentation ratio** in `INFO memory` (~1.0–1.5 is healthy).
+
+---
+
+## Backups & recovery
+- Copy `dump.rdb` (and the AOF dir) on a schedule, or use `BGSAVE` then copy.
+- Managed services (AWS ElastiCache, Redis Cloud, Upstash) handle snapshots/HA for you.
+- Test restores periodically — a backup you've never restored is a hope, not a backup.
+
+## Common pitfalls
+- ❌ Assuming Redis is durable by default — verify your `save`/`appendonly` config.
+- ❌ `noeviction` + no monitoring → writes start failing when memory fills.
+- ❌ No `maxmemory` set → Redis can consume all RAM and get OOM-killed.
+- ❌ Using `SAVE` (blocking) instead of `BGSAVE` in production.
+
+## Best practices
+- ✅ For data you care about: RDB + AOF (`everysec`).
+- ✅ For pure cache: disable persistence, set `maxmemory` + `allkeys-lru`.
+- ✅ Always set `maxmemory` so Redis can't exhaust the host.
+- ✅ Automate and **test** backups.
+
+## Try it yourself
+1. Run `CONFIG GET save` and `CONFIG GET appendonly` to see your current durability.
+2. Set `CONFIG SET maxmemory 50mb` and `CONFIG SET maxmemory-policy allkeys-lru`, then
+   write keys in a loop and watch older ones get evicted via `DBSIZE`.
+3. `BGSAVE`, then locate the `dump.rdb` file on disk.
+
+➡️ Next: [Scaling Redis](./09-scaling.mdx)

@@ -1,0 +1,208 @@
+---
+title: Caching Patterns
+order: 5
+description: The most common reason to use Redis — cache-aside, write-through, write-behind, TTL strategy, invalidation, and the cache stampede problem.
+---
+
+# Caching Patterns
+
+## What you'll learn
+- The classic caching strategies and their trade-offs
+- How to implement **cache-aside** in Node.js (the one you'll use 90% of the time)
+- Choosing TTLs and invalidating correctly
+- Avoiding the **cache stampede** / thundering herd problem
+
+Caching is the #1 use of Redis: keep a fast copy of expensive data (a DB query, an API
+response, a computed result) so you don't recompute it every time.
+
+---
+
+## 1. Cache-Aside (Lazy Loading) — the default
+The application checks the cache first. On a **miss**, it loads from the database and
+writes the result back into the cache.
+
+```
+        ┌─ hit ──────────────▶ return cached value
+ read ──┤
+        └─ miss ─▶ load from DB ─▶ store in Redis (with TTL) ─▶ return
+```
+
+```js
+import client from './redisClient.js';
+
+async function getUser(id, db) {
+  const key = `user:${id}`;
+
+  // 1. Try the cache
+  const cached = await client.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // 2. Miss -> hit the database
+  const user = await db.users.findById(id);
+  if (!user) return null;
+
+  // 3. Populate the cache for next time (5 min TTL)
+  await client.set(key, JSON.stringify(user), { EX: 300 });
+  return user;
+}
+```
+
+**Pros:** simple, only caches what's actually read, resilient (cache down ⇒ fall back to DB).
+**Cons:** first request per key is always a miss; cache can be briefly stale after a write.
+
+---
+
+## 2. Write-Through
+Every write goes to the cache **and** the database synchronously, so the cache is always
+fresh.
+
+```js
+async function updateUser(id, data, db) {
+  const user = await db.users.update(id, data);     // write DB
+  await client.set(`user:${id}`, JSON.stringify(user), { EX: 300 }); // and cache
+  return user;
+}
+```
+**Pros:** cache never stale. **Cons:** every write pays the cache cost; you may cache data
+that's never read.
+
+---
+
+## 3. Write-Behind (Write-Back)
+Writes go to the cache immediately and are flushed to the DB asynchronously (via a queue).
+Fast writes, but risk of data loss if Redis dies before the flush. Use only when you can
+tolerate eventual durability — rarely the right default for app data.
+
+---
+
+## Cache invalidation
+> "There are only two hard things in Computer Science: cache invalidation and naming things."
+
+When the underlying data changes, the cached copy must go. Two strategies:
+
+**TTL-based (passive):** let keys expire. Simple; tolerates short staleness.
+```js
+await client.set(key, value, { EX: 300 }); // self-heals in ≤5 min
+```
+
+**Explicit (active):** delete the key on write.
+```js
+async function updateUser(id, data, db) {
+  const user = await db.users.update(id, data);
+  await client.del(`user:${id}`);   // next read repopulates fresh
+  return user;
+}
+```
+
+> A robust pattern is **both**: explicit delete on write *and* a TTL as a safety net for
+> writes you forgot to hook (or that happened outside your app).
+
+### Invalidating groups of keys
+If one change affects many cached items, either key them so a single delete covers them,
+or track related keys in a Set and delete them together. Avoid `KEYS pattern` + delete in
+production — iterate with `SCAN`:
+```js
+for await (const keys of client.scanIterator({ MATCH: 'user:1000:*' })) {
+  if (keys.length) await client.del(keys);
+}
+```
+
+---
+
+## Choosing a TTL
+| Data | Suggested TTL |
+|------|---------------|
+| Rarely changing (config, country list) | hours–days |
+| User profiles | 5–15 min |
+| Pricing / inventory | seconds–1 min |
+| Highly volatile / personalized | very short or don't cache |
+
+Rule of thumb: **TTL = how stale you can tolerate.** Add explicit invalidation when you
+need it fresher than the TTL allows.
+
+---
+
+## The cache stampede (thundering herd)
+When a popular key expires, *many* concurrent requests miss at once and all slam the
+database to rebuild it — a traffic spike that can take the DB down.
+
+**Mitigations:**
+
+**a) Lock / single-flight** — only one request rebuilds; others wait or serve stale.
+```js
+async function getWithLock(key, ttl, loader) {
+  const cached = await client.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // Try to acquire a short rebuild lock (NX = only if not set)
+  const gotLock = await client.set(`lock:${key}`, '1', { NX: true, EX: 10 });
+  if (!gotLock) {
+    // Someone else is rebuilding — wait briefly, then read the fresh value
+    await new Promise((r) => setTimeout(r, 50));
+    return getWithLock(key, ttl, loader);
+  }
+  try {
+    const fresh = await loader();
+    await client.set(key, JSON.stringify(fresh), { EX: ttl });
+    return fresh;
+  } finally {
+    await client.del(`lock:${key}`);
+  }
+}
+```
+
+**b) Jittered TTL** — randomize expiry so keys don't all die at the same instant.
+```js
+const ttl = 300 + Math.floor(Math.random() * 60); // 300–360s
+await client.set(key, value, { EX: ttl });
+```
+
+**c) Early/background refresh** — refresh before expiry when a read sees the TTL getting low.
+
+---
+
+## Caching whole HTTP responses (Express)
+```js
+function cacheMiddleware(ttl = 60) {
+  return async (req, res, next) => {
+    const key = `http:${req.originalUrl}`;
+    const cached = await client.get(key);
+    if (cached) {
+      res.set('X-Cache', 'HIT');
+      return res.type('application/json').send(cached);
+    }
+    const json = res.json.bind(res);
+    res.json = (body) => {
+      client.set(key, JSON.stringify(body), { EX: ttl }).catch(() => {});
+      res.set('X-Cache', 'MISS');
+      return json(body);
+    };
+    next();
+  };
+}
+
+app.get('/api/products', cacheMiddleware(120), productsHandler);
+```
+
+---
+
+## Common pitfalls
+- ❌ No TTL → stale data forever and unbounded memory.
+- ❌ Caching without invalidation → users see old data after writes.
+- ❌ Identical TTLs on hot keys → synchronized expiry → stampede.
+- ❌ Caching personalized data under a shared key → data leaks between users.
+
+## Best practices
+- ✅ Default to **cache-aside** + a TTL; add explicit `DEL` on writes.
+- ✅ Add **jitter** to TTLs of hot keys.
+- ✅ Use a rebuild **lock** for expensive-to-compute hot keys.
+- ✅ Treat the cache as optional — always be able to fall back to the source.
+
+## Try it yourself
+1. Implement `getUser` cache-aside against a fake `db` (an in-memory object + a 200ms
+   `setTimeout` to simulate latency). Time the first vs second call.
+2. Add a 30s TTL with ±10s jitter.
+3. Fire 50 concurrent `getUser(1)` calls right after the key expires; add the rebuild
+   lock and confirm the "DB" is hit only once.
+
+➡️ Next: [Pub/Sub & Streams](./06-pubsub-and-streams.mdx)

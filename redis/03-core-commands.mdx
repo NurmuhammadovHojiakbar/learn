@@ -1,0 +1,156 @@
+---
+title: Core Commands & Key Management
+order: 3
+description: Expiry/TTL, key naming conventions, atomic operations, and iterating keys safely with SCAN instead of KEYS.
+---
+
+# Core Commands & Key Management
+
+## What you'll learn
+- How keys, expiry, and TTL work
+- Key naming conventions that scale
+- Why `SCAN` beats `KEYS` in production
+- Atomic operations you'll reach for constantly
+
+---
+
+## Keys are everything
+Every value in Redis lives under a **key** (a binary-safe string). Good key design is
+the difference between a tidy keyspace and an unmaintainable mess.
+
+### Naming convention: colons
+```
+<object>:<id>:<attribute>
+```
+```bash
+user:1000:profile
+user:1000:sessions
+post:42:comments
+cache:weather:london
+```
+Redis doesn't enforce this, but tools (and humans) rely on it. The colon also lets you
+pattern-match a logical group: `user:1000:*`.
+
+### Basic key commands
+```bash
+EXISTS user:1000:profile      # 1 or 0
+DEL user:1000:profile         # delete, returns count removed
+TYPE user:1000:profile        # string | list | hash | ...
+RENAME old:key new:key
+KEYS user:*                   # ⚠️ blocks — see SCAN below
+RANDOMKEY                     # a random existing key
+```
+
+---
+
+## Expiry & TTL
+This is one of Redis's most important features. Any key can be given a **time to live**,
+after which Redis deletes it automatically.
+
+```bash
+SET session:abc "data"
+EXPIRE session:abc 60         # expires in 60 seconds
+TTL session:abc               # seconds remaining
+PTTL session:abc              # milliseconds remaining
+PERSIST session:abc           # remove the expiry (make permanent)
+
+# Set value + expiry in one atomic command (preferred)
+SET session:abc "data" EX 60          # 60 seconds
+SET session:abc "data" PX 60000       # 60000 ms
+SET cache:x "v" EX 300 NX             # only set if NOT exists (great for locks)
+```
+
+### TTL return values
+| Value | Meaning |
+|-------|---------|
+| `> 0` | seconds left |
+| `-1`  | key exists but has **no** expiry |
+| `-2`  | key does **not** exist |
+
+> **Best practice:** for cache keys, always set the TTL **atomically** with `SET ... EX`
+> rather than a separate `EXPIRE`. A crash between the two could leave a key that never
+> expires.
+
+---
+
+## Atomic operations
+Because Redis runs commands one at a time, these are race-condition-free without locks:
+
+```bash
+INCR counter                  # +1, returns new value
+INCRBY counter 5
+DECR counter
+SETNX lock:job "1"            # set only if not exists -> 1, else 0 (poor-man's lock)
+GETSET key newval            # set new, return old (atomic swap)
+GETDEL key                   # get value and delete it atomically
+```
+
+These power **rate limiters, counters, and locks** without any extra coordination.
+
+---
+
+## SCAN vs KEYS — the production rule
+`KEYS pattern` returns *all* matches in a single blocking call. On a database with
+millions of keys it **freezes the server** for everyone. Never use it in production.
+
+`SCAN` walks the keyspace incrementally with a cursor, returning a few keys per call so
+the server stays responsive.
+
+```bash
+# cursor starts at 0; Redis returns a new cursor + a batch
+SCAN 0 MATCH user:* COUNT 100
+# -> 1) "17"            (next cursor; 0 means done)
+#    2) 1) "user:1000"
+#       2) "user:1001"
+SCAN 17 MATCH user:* COUNT 100   # continue until cursor returns 0
+```
+
+From the CLI, the helper handles the loop for you:
+```bash
+redis-cli --scan --pattern 'user:*'
+```
+
+There are type-specific variants too: `HSCAN`, `SSCAN`, `ZSCAN` for iterating big
+hashes/sets/sorted-sets.
+
+### In Node.js — use the async iterator
+node-redis exposes `scanIterator`, which manages the cursor for you:
+```js
+for await (const keys of client.scanIterator({ MATCH: 'user:*', COUNT: 100 })) {
+  for (const key of keys) {
+    console.log('found', key);
+  }
+}
+```
+
+---
+
+## Inspecting & debugging
+```bash
+DBSIZE                        # number of keys in current DB
+INFO memory                   # memory usage stats
+MEMORY USAGE user:1000        # bytes used by one key
+OBJECT ENCODING user:1000     # internal encoding (ziplist, hashtable, ...)
+DEBUG SLEEP 0                 # no-op; useful for testing
+```
+
+---
+
+## Common pitfalls
+- ❌ `KEYS *` in production — blocks the single thread. Always `SCAN`.
+- ❌ Separate `SET` then `EXPIRE` — use `SET key val EX n` to stay atomic.
+- ❌ Unbounded keys with no TTL — your memory grows until eviction kicks in (or OOM).
+- ❌ Inconsistent key naming — pick a convention and stick to it.
+
+## Best practices
+- ✅ Namespace everything with colons.
+- ✅ Default to a TTL; only `PERSIST`/omit it for data you truly want to keep.
+- ✅ Use atomic counters (`INCR`) instead of read-modify-write from the app.
+
+## Try it yourself
+1. `SET cart:user:1000 "[item1]" EX 30` and confirm `TTL cart:user:1000`.
+2. Add 9 more keys `cart:user:1001..1009`, then iterate them all with
+   `redis-cli --scan --pattern 'cart:user:*'`.
+3. Run `INCR cart:counter` ten times and verify it equals 10.
+
+➡️ Next: [Node.js: Getting Started](./04-nodejs-getting-started.mdx)

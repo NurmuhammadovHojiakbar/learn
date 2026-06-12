@@ -1,0 +1,219 @@
+---
+title: Data Types
+order: 2
+description: The core Redis data structures — strings, lists, sets, sorted sets, hashes, bitmaps, HyperLogLog, streams, geo — and when to use each.
+---
+
+# Redis Data Types
+
+## What you'll learn
+- Every core Redis data type and the commands to manipulate it
+- **When to choose each type** for a real problem
+- How the same operations look from Node.js with node-redis
+
+Redis is a *data structure server*. Picking the right structure is most of the skill.
+
+---
+
+## 1. Strings
+The simplest type — a key maps to a value (text, number, or binary up to 512 MB).
+
+```bash
+SET user:1000:name "Ada"
+GET user:1000:name            # "Ada"
+APPEND user:1000:name " Lovelace"
+STRLEN user:1000:name         # 13
+
+# Numbers are atomic counters
+SET views 0
+INCR views                    # 1
+INCRBY views 10               # 11
+DECR views                    # 10
+```
+
+**Use for:** caching values/JSON blobs, counters, flags, simple key/value.
+
+```js
+await client.set('user:1000:name', 'Ada', { EX: 3600 }); // 1h TTL
+const name = await client.get('user:1000:name');
+await client.incr('views');
+```
+
+---
+
+## 2. Lists
+Ordered collection of strings — a linked list. Fast pushes/pops at both ends.
+
+```bash
+LPUSH queue:jobs "job1"       # push to head
+RPUSH queue:jobs "job2"       # push to tail
+LRANGE queue:jobs 0 -1        # ["job1", "job2"]
+LPOP queue:jobs               # "job1"
+LLEN queue:jobs               # 1
+BRPOP queue:jobs 5            # blocking pop, waits up to 5s
+```
+
+**Use for:** simple queues/stacks, recent-activity feeds, job lists.
+
+```js
+await client.rPush('queue:jobs', JSON.stringify({ id: 1, type: 'email' }));
+const raw = await client.lPop('queue:jobs');
+const job = raw ? JSON.parse(raw) : null;
+```
+
+---
+
+## 3. Sets
+Unordered collection of **unique** strings. Great for membership tests and set algebra.
+
+```bash
+SADD tags:post:1 "redis" "nodejs" "cache"
+SISMEMBER tags:post:1 "redis"   # 1 (true)
+SMEMBERS tags:post:1            # all members
+SCARD tags:post:1              # count = 3
+SINTER tags:post:1 tags:post:2 # intersection (common tags)
+SUNION tags:post:1 tags:post:2 # union
+```
+
+**Use for:** tags, unique visitors, "who liked this", relationships, dedup.
+
+```js
+await client.sAdd('online:users', 'user:1000');
+const isOnline = await client.sIsMember('online:users', 'user:1000');
+```
+
+---
+
+## 4. Sorted Sets (ZSet)
+Like a set, but every member has a **score** used to keep them ordered. The killer
+feature for rankings.
+
+```bash
+ZADD leaderboard 100 "Ada" 250 "Linus" 175 "Grace"
+ZRANGE leaderboard 0 -1 WITHSCORES        # ascending
+ZREVRANGE leaderboard 0 2 WITHSCORES      # top 3
+ZRANK leaderboard "Grace"                 # position (0-based)
+ZINCRBY leaderboard 50 "Ada"              # bump a score
+ZRANGEBYSCORE leaderboard 150 300         # range query by score
+```
+
+**Use for:** leaderboards, priority queues, time-series, rate limiting (score = timestamp).
+
+```js
+await client.zAdd('leaderboard', [{ score: 100, value: 'Ada' }]);
+const top3 = await client.zRange('leaderboard', 0, 2, { REV: true });
+```
+
+---
+
+## 5. Hashes
+A key maps to a set of **field → value** pairs — like a mini object/record.
+
+```bash
+HSET user:1000 name "Ada" age 36 country "UK"
+HGET user:1000 name           # "Ada"
+HGETALL user:1000             # all fields
+HINCRBY user:1000 age 1       # 37
+HDEL user:1000 country
+HEXISTS user:1000 name        # 1
+```
+
+**Use for:** storing objects/records without serializing the whole thing to JSON —
+you can read/update individual fields cheaply.
+
+```js
+await client.hSet('user:1000', { name: 'Ada', age: 36 });
+const user = await client.hGetAll('user:1000'); // { name: 'Ada', age: '36' }
+```
+
+> Note: hash values are always strings — numbers come back as `'36'`.
+
+---
+
+## 6. Bitmaps
+Bit-level operations on a string. Extremely memory-efficient for boolean flags.
+
+```bash
+SETBIT active:2026-06-12 1000 1   # mark user 1000 active today
+GETBIT active:2026-06-12 1000     # 1
+BITCOUNT active:2026-06-12        # how many users active today
+```
+
+**Use for:** daily active users, feature flags per user, attendance — millions of
+booleans in a few KB.
+
+---
+
+## 7. HyperLogLog
+Probabilistic structure that counts **unique** items using ~12 KB regardless of size
+(with ~0.81% error).
+
+```bash
+PFADD visitors:2026-06-12 "ip1" "ip2" "ip1"
+PFCOUNT visitors:2026-06-12       # ~2 unique
+```
+
+**Use for:** approximate unique counts (unique visitors, search terms) where exactness
+isn't critical and memory matters.
+
+---
+
+## 8. Streams
+An append-only log of entries — like Kafka-lite built into Redis. Each entry has an ID
+and field/value pairs. Supports **consumer groups** for scalable processing.
+
+```bash
+XADD events * type "signup" user "1000"     # * = auto ID
+XLEN events
+XRANGE events - +                            # read all
+XREAD COUNT 10 STREAMS events 0              # read from start
+```
+
+**Use for:** event sourcing, durable message queues, activity logs. Covered fully in
+[Lesson 06](./06-pubsub-and-streams.mdx).
+
+---
+
+## 9. Geospatial
+Sorted sets under the hood — store coordinates and query by distance.
+
+```bash
+GEOADD stores -0.127 51.507 "london" -73.99 40.73 "nyc"
+GEODIST stores london nyc km          # distance in km
+GEOSEARCH stores FROMMEMBER london BYRADIUS 100 km ASC
+```
+
+**Use for:** "find nearby" features, delivery zones, store locators.
+
+---
+
+## Choosing the right type — cheat sheet
+| You need… | Use |
+|-----------|-----|
+| A cached value / counter | **String** |
+| FIFO/LIFO queue | **List** |
+| Unique membership, tags | **Set** |
+| Ranking / scores / priority | **Sorted Set** |
+| An object with fields | **Hash** |
+| Millions of booleans | **Bitmap** |
+| Approximate unique count | **HyperLogLog** |
+| Durable event log | **Stream** |
+| "Find nearby" | **Geo** |
+
+## Common pitfalls
+- ❌ Storing a giant JSON string and re-writing the whole thing for a one-field update —
+  use a **Hash** instead.
+- ❌ Using a List when you need uniqueness — use a **Set**.
+- ❌ Building leaderboards by sorting in your app — let a **Sorted Set** do it.
+
+## Best practices
+- ✅ Match the structure to the access pattern, not the data shape.
+- ✅ Keep individual values reasonably small; very large collections can cause big-O surprises.
+
+## Try it yourself
+Build a tiny leaderboard:
+1. `ZADD game:scores 10 alice 25 bob 18 carol`
+2. Get the top 2 players with scores.
+3. Give `alice` +20 points and check her new rank.
+
+➡️ Next: [Core Commands & Keys](./03-core-commands.mdx)

@@ -1,0 +1,176 @@
+---
+title: "Node.js: Getting Started"
+order: 4
+description: Install node-redis, create and connect a client, run commands with async/await, handle errors, and shut down gracefully.
+---
+
+# Using Redis with Node.js
+
+## What you'll learn
+- Installing and configuring the official `node-redis` client
+- Connecting (and reconnecting) safely
+- Running commands with `async/await`
+- Error handling and graceful shutdown
+- The reusable client module pattern you'll copy into real projects
+
+---
+
+## Install
+```bash
+npm install redis
+```
+This is the **official** client maintained by Redis (the `redis` package, v4+). It has a
+modern promise-based API. (The other popular client, `ioredis`, has a similar API — notes
+where it differs appear in later lessons.)
+
+---
+
+## Your first connection
+```js
+import { createClient } from 'redis';
+
+const client = createClient({
+  url: 'redis://localhost:6379',
+});
+
+// ALWAYS attach an error listener — without it, errors throw and crash the process
+client.on('error', (err) => console.error('Redis Client Error', err));
+
+await client.connect();
+
+await client.set('greeting', 'hello');
+const value = await client.get('greeting');
+console.log(value); // "hello"
+
+await client.quit();
+```
+
+> **CommonJS?** Use `const { createClient } = require('redis');` — everything else is the same.
+
+### Connection options
+```js
+const client = createClient({
+  url: 'redis://:password@my-host:6379/0', // user:pass@host:port/db
+  socket: {
+    connectTimeout: 5000,
+    reconnectStrategy: (retries) => Math.min(retries * 50, 2000), // backoff, capped at 2s
+  },
+});
+```
+By default node-redis **automatically reconnects** with retries. The `reconnectStrategy`
+returns the delay (ms) before the next attempt — return an `Error` to stop trying.
+
+---
+
+## Running commands
+Method names mirror Redis commands in camelCase, and each returns a promise:
+
+```js
+await client.set('user:1000:name', 'Ada', { EX: 3600 }); // options as an object
+await client.incr('views');
+await client.hSet('user:1000', { name: 'Ada', age: 36 });
+const user = await client.hGetAll('user:1000');
+await client.rPush('queue:jobs', 'job1');
+await client.expire('user:1000:name', 60);
+```
+
+Mapping is predictable:
+| redis-cli | node-redis |
+|-----------|-----------|
+| `SET k v EX 60` | `client.set('k', 'v', { EX: 60 })` |
+| `GET k` | `client.get('k')` |
+| `HGETALL k` | `client.hGetAll('k')` |
+| `ZADD k 1 a` | `client.zAdd('k', [{ score: 1, value: 'a' }])` |
+| `EXPIRE k 30` | `client.expire('k', 30)` |
+
+---
+
+## Error handling
+Wrap calls in `try/catch`. Redis being briefly unavailable should **degrade gracefully**,
+not crash your request handler:
+
+```js
+async function getCachedUser(id) {
+  try {
+    const cached = await client.get(`user:${id}`);
+    return cached ? JSON.parse(cached) : null;
+  } catch (err) {
+    console.error('Redis read failed, falling back to DB', err);
+    return null; // let the caller hit the database instead
+  }
+}
+```
+
+A cache that's down should slow you down, not take you down.
+
+---
+
+## A reusable client module
+In real apps, create **one** shared client and import it everywhere. Don't open a new
+connection per request.
+
+```js
+// redisClient.js
+import { createClient } from 'redis';
+
+const client = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
+  socket: {
+    reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
+  },
+});
+
+client.on('error', (err) => console.error('Redis Client Error', err));
+client.on('connect', () => console.log('Redis connecting...'));
+client.on('ready', () => console.log('Redis ready'));
+
+await client.connect();
+
+export default client;
+```
+
+```js
+// anywhere.js
+import client from './redisClient.js';
+await client.set('ping', 'pong');
+```
+
+---
+
+## Graceful shutdown
+Close the connection cleanly when your process exits so in-flight commands finish:
+
+```js
+async function shutdown() {
+  console.log('Shutting down...');
+  await client.quit();      // flushes pending commands, then closes
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+```
+
+> `quit()` waits for pending replies; `disconnect()` closes immediately. Prefer `quit()`.
+
+---
+
+## Common pitfalls
+- ❌ **No `error` listener** — unhandled Redis errors crash Node.
+- ❌ Opening a new client per HTTP request — exhausts connections. Share one client.
+- ❌ Forgetting `await client.connect()` before issuing commands (v4 doesn't auto-connect).
+- ❌ Letting a cache outage throw into request handlers — catch and fall back.
+
+## Best practices
+- ✅ One shared, long-lived client per process.
+- ✅ Read config (URL/password) from environment variables.
+- ✅ Add `error`/`ready` listeners and a graceful shutdown hook.
+
+## Try it yourself
+1. Create `redisClient.js` as above.
+2. Write a script that stores a JSON object with `JSON.stringify`, reads it back, and
+   `JSON.parse`s it.
+3. Kill your Redis container mid-run and watch node-redis log reconnect attempts, then
+   restart it and confirm commands resume.
+
+➡️ Next: [Caching Patterns](./05-caching-patterns.mdx)

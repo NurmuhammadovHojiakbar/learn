@@ -1,0 +1,119 @@
+---
+title: Introduction & Setup
+order: 1
+description: What Redis is, when to reach for it, how to install it, and the basics of redis-cli.
+---
+
+# Introduction to Redis
+
+## What you'll learn
+- What Redis actually is and why it's so fast
+- Real use cases where Redis shines (and where it doesn't)
+- How to install and run Redis locally
+- How to talk to Redis with `redis-cli`
+
+## What is Redis?
+**Redis** (REmote DImensionary Server) is an open-source, **in-memory** data store.
+It keeps data in RAM, which makes reads and writes blazingly fast — typically
+**sub-millisecond**. It's often called a "data structure server" because you don't
+just store strings; you store **lists, sets, hashes, sorted sets, streams**, and more.
+
+Redis is single-threaded for command execution, which sounds limiting but is actually
+a feature: every command is **atomic**, so you never get partial updates from
+concurrent clients.
+
+```
+        ┌────────────┐    sub-ms     ┌──────────────────┐
+ App ───▶│ node-redis │──────────────▶│  Redis (in RAM)  │
+        └────────────┘   commands     └──────────────────┘
+```
+
+## When should you use Redis?
+| Use case | Why Redis fits |
+|----------|----------------|
+| **Caching** | Avoid hitting a slow DB/API repeatedly |
+| **Sessions** | Fast, shared session store across app instances |
+| **Rate limiting** | Atomic counters with TTL |
+| **Leaderboards** | Sorted sets rank millions of items instantly |
+| **Queues / jobs** | Lists & streams power background workers |
+| **Pub/Sub** | Real-time notifications, chat, live updates |
+| **Distributed locks** | Coordinate work across servers |
+
+### When *not* to use Redis
+- As your **only** database for large datasets that must live on disk (RAM is finite/expensive).
+- For complex relational queries, joins, or reporting — use Postgres/MySQL.
+- When you need strong durability guarantees for every single write (it can persist,
+  but it's optimized for speed, not ACID transactions across many tables).
+
+A common, healthy architecture: **Postgres as the source of truth + Redis as a cache/
+accelerator in front of it.**
+
+## Installing Redis
+
+### Docker (recommended for learning)
+```bash
+docker run --name redis -p 6379:6379 -d redis:7
+```
+
+### macOS
+```bash
+brew install redis
+brew services start redis
+```
+
+### Ubuntu / Debian
+```bash
+sudo apt-get update && sudo apt-get install redis-server
+sudo systemctl enable --now redis-server
+```
+
+### Verify
+```bash
+redis-cli ping
+# PONG
+```
+
+## Meet redis-cli
+`redis-cli` is the interactive shell for Redis. Just type `redis-cli` to enter it:
+
+```bash
+$ redis-cli
+127.0.0.1:6379> SET greeting "hello"
+OK
+127.0.0.1:6379> GET greeting
+"hello"
+127.0.0.1:6379> DEL greeting
+(integer) 1
+127.0.0.1:6379> exit
+```
+
+Useful one-liners:
+```bash
+redis-cli SET name "Ada"          # run a single command
+redis-cli -n 1 GET name           # use database index 1 (Redis has 16 by default)
+redis-cli MONITOR                 # watch every command hitting the server (debug only!)
+redis-cli INFO server             # server stats
+redis-cli --scan --pattern 'user:*'  # safely list matching keys
+```
+
+> **Databases:** Redis has numbered logical databases (0–15 by default). Switch with
+> `SELECT 1`. In practice, most apps use only DB 0 and namespace keys instead.
+
+## Common pitfalls
+- ❌ Treating Redis as a permanent database without configuring persistence — a restart
+  can lose data if you haven't enabled RDB/AOF (covered in Lesson 08).
+- ❌ Running `KEYS *` on a production server — it blocks the single thread. Use `SCAN`.
+- ❌ Forgetting that everything lives in RAM — set TTLs and an eviction policy.
+
+## Best practices
+- ✅ Always set a TTL on cache keys so memory can't grow unbounded.
+- ✅ Namespace keys with colons: `user:1000:cart`.
+- ✅ Keep one Redis concern per database/instance when it grows (cache vs queue vs sessions).
+
+## Try it yourself
+1. Start Redis with Docker.
+2. In `redis-cli`, set a key `course:name` to `"Redis for Developers"` and read it back.
+3. Give it a 10-second TTL with `EXPIRE course:name 10`, then run `TTL course:name`
+   a few times and watch it count down to `-2` (gone).
+
+➡️ Next: [Data Types](./02-data-types.mdx)

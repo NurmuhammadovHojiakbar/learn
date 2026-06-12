@@ -1,0 +1,236 @@
+---
+title: "Node.js in Production"
+order: 10
+description: Putting it all together — sessions, rate limiting, distributed locks, job queues with BullMQ, security (AUTH/ACL/TLS), and monitoring.
+---
+
+# Redis in Production with Node.js
+
+## What you'll learn
+The real-world building blocks you'll actually ship:
+- Sessions with Express
+- Rate limiting
+- Distributed locks
+- Background jobs with **BullMQ**
+- Security: AUTH, ACLs, TLS
+- Monitoring & operational health
+
+This lesson assumes the shared `client` from [Lesson 04](./04-nodejs-getting-started.mdx).
+
+---
+
+## 1. Sessions (Express)
+Store sessions in Redis so they're shared across all app instances and survive restarts.
+
+```bash
+npm install express express-session connect-redis
+```
+```js
+import session from 'express-session';
+import { RedisStore } from 'connect-redis';
+import client from './redisClient.js';
+
+app.use(session({
+  store: new RedisStore({ client, prefix: 'sess:' }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, secure: true, maxAge: 1000 * 60 * 60 * 24 }, // 1 day
+}));
+```
+Now any server in your cluster can read the same session — essential for horizontal scaling.
+
+---
+
+## 2. Rate limiting
+Limit requests per user/IP per time window using an atomic counter with TTL.
+
+```js
+// Fixed-window limiter: max `limit` requests per `windowSec`
+async function rateLimit(id, limit = 100, windowSec = 60) {
+  const key = `rl:${id}`;
+  const count = await client.incr(key);
+  if (count === 1) await client.expire(key, windowSec); // first hit sets the window
+  return { allowed: count <= limit, remaining: Math.max(0, limit - count) };
+}
+
+// Express middleware
+app.use(async (req, res, next) => {
+  const { allowed, remaining } = await rateLimit(req.ip, 100, 60);
+  res.set('X-RateLimit-Remaining', remaining);
+  if (!allowed) return res.status(429).json({ error: 'Too Many Requests' });
+  next();
+});
+```
+
+> The `INCR` + `EXPIRE` pair has a tiny race (two requests can both see count 1). For
+> exactness, do it in the **Lua script** from [Lesson 07](./07-transactions-and-scripting.mdx),
+> which makes increment-and-expire atomic. For sliding windows, use a **sorted set** keyed
+> by timestamp (`ZADD` now, `ZREMRANGEBYSCORE` to drop old, `ZCARD` to count).
+
+---
+
+## 3. Distributed locks
+Coordinate work across processes so only one runs a critical section at a time.
+
+```js
+import { randomUUID } from 'crypto';
+
+async function withLock(resource, ttlMs, fn) {
+  const key = `lock:${resource}`;
+  const token = randomUUID();               // unique owner token
+  // Acquire only if not held (NX), auto-expire so a crash can't deadlock (PX)
+  const acquired = await client.set(key, token, { NX: true, PX: ttlMs });
+  if (!acquired) throw new Error('Could not acquire lock');
+
+  try {
+    return await fn();
+  } finally {
+    // Release ONLY if we still own it — atomic check-and-delete via Lua
+    await client.eval(
+      `if redis.call('GET', KEYS[1]) == ARGV[1]
+         then return redis.call('DEL', KEYS[1]) else return 0 end`,
+      { keys: [key], arguments: [token] }
+    );
+  }
+}
+
+await withLock('reports:daily', 30000, async () => {
+  await generateDailyReport();
+});
+```
+
+**Why the token + Lua release?** Without it, a slow process could delete a lock another
+process already re-acquired. The token ensures you only release **your own** lock.
+
+> For multi-node correctness, the **Redlock** algorithm (and the `redlock` npm package)
+> acquires the lock across several independent Redis nodes. For a single Redis, the pattern
+> above is the standard.
+
+---
+
+## 4. Background jobs with BullMQ
+For real job processing (retries, delays, priorities, scheduling, concurrency, a
+dashboard), use **BullMQ** — the de-facto Redis-backed queue for Node.
+
+```bash
+npm install bullmq
+```
+```js
+// producer.js — add jobs
+import { Queue } from 'bullmq';
+const connection = { host: 'localhost', port: 6379 };
+const emailQueue = new Queue('emails', { connection });
+
+await emailQueue.add(
+  'welcome',
+  { to: 'ada@example.com' },
+  { attempts: 3, backoff: { type: 'exponential', delay: 1000 }, removeOnComplete: true }
+);
+```
+```js
+// worker.js — process jobs
+import { Worker } from 'bullmq';
+const connection = { host: 'localhost', port: 6379 };
+
+const worker = new Worker('emails', async (job) => {
+  await sendEmail(job.data.to);
+}, { connection, concurrency: 5 });
+
+worker.on('completed', (job) => console.log(`done ${job.id}`));
+worker.on('failed', (job, err) => console.error(`failed ${job?.id}`, err));
+```
+BullMQ also supports **delayed** jobs, **repeatable/cron** jobs, rate-limited workers, and
+flows. Prefer it over hand-rolled Streams/Lists unless you want zero dependencies.
+
+---
+
+## 5. Security
+Redis is fast partly because it trusts its network. **Never expose it to the internet
+unprotected.**
+
+**Require a password** (or, better, ACL users):
+```conf
+requirepass "a-long-random-password"
+```
+```js
+const client = createClient({ url: 'redis://:a-long-random-password@host:6379' });
+```
+
+**ACLs (Redis 6+)** — least-privilege users instead of one global password:
+```bash
+# A user that can only read/write keys under cache:* and run GET/SET
+ACL SETUSER appcache on >secret ~cache:* +GET +SET +DEL +EXPIRE
+ACL LIST
+```
+
+**TLS in transit:**
+```js
+const client = createClient({
+  url: 'rediss://host:6380',          // note: rediss (two s) = TLS
+  socket: { tls: true, rejectUnauthorized: true },
+});
+```
+
+**Other hardening:**
+- Bind to private interfaces / use a firewall or VPC; don't listen on `0.0.0.0` publicly.
+- `rename-command FLUSHALL ""` (and `FLUSHDB`, `CONFIG`) to disable dangerous commands.
+- Keep Redis patched; use a managed provider if you can.
+
+---
+
+## 6. Monitoring & health
+```bash
+INFO                         # everything: memory, clients, stats, replication
+INFO stats                   # ops/sec, hits/misses, evictions
+SLOWLOG GET 10               # slowest recent commands
+CLIENT LIST                  # connected clients
+LATENCY DOCTOR               # latency analysis
+```
+
+Track these metrics:
+- **Hit rate** = `keyspace_hits / (keyspace_hits + keyspace_misses)` — low rate = caching
+  the wrong things or TTLs too short.
+- **Memory** vs `maxmemory`, and **evicted_keys**.
+- **Connected clients** (watch for leaks — share one client!).
+- **Replication lag** and failover events.
+
+A `/health` endpoint that does `await client.ping()` lets your orchestrator know Redis is
+reachable.
+
+```js
+app.get('/health', async (req, res) => {
+  try { await client.ping(); res.json({ redis: 'ok' }); }
+  catch { res.status(503).json({ redis: 'down' }); }
+});
+```
+
+---
+
+## Production checklist
+- ✅ One shared client per process; graceful shutdown with `quit()`.
+- ✅ TTLs on cache keys + an eviction policy + `maxmemory`.
+- ✅ Persistence configured to match your durability needs (Lesson 08).
+- ✅ AUTH/ACL + TLS + network isolation; dangerous commands disabled/renamed.
+- ✅ Cache failures degrade gracefully (try/catch + DB fallback).
+- ✅ Monitoring on hit rate, memory, evictions, latency, replication.
+- ✅ Use BullMQ for jobs; Redlock for multi-node locks.
+- ✅ Load-test before you trust it under real traffic.
+
+## Common pitfalls
+- ❌ Exposing Redis to the public internet without AUTH/TLS.
+- ❌ Releasing someone else's lock (no owner token).
+- ❌ Non-atomic rate limiting under high concurrency — use Lua.
+- ❌ Treating a cache outage as fatal instead of degrading to the source of truth.
+
+## Try it yourself
+1. Add `connect-redis` sessions to a small Express app and confirm the session key appears
+   in Redis (`SCAN 0 MATCH sess:*`).
+2. Implement the `withLock` helper and run two processes competing for the same lock; only
+   one should enter the critical section.
+3. Wire up a BullMQ `emails` queue + worker with 3 retries and force a failure to watch it
+   retry with backoff.
+
+🎉 **You've completed the course.** You now know Redis data types, caching, messaging,
+transactions, persistence, scaling, and how to run it safely with Node.js in production.
+Go build something fast.

@@ -1,0 +1,168 @@
+---
+title: Scaling Redis
+order: 9
+description: Growing Redis beyond one node — replication for read scaling, Sentinel for high availability, and Cluster for sharding.
+---
+
+# Scaling Redis
+
+## What you'll learn
+- **Replication** — read replicas and redundancy
+- **Sentinel** — automatic failover / high availability
+- **Cluster** — horizontal sharding across many nodes
+- How these affect your Node.js client
+
+A single Redis node is fast and handles a lot. Scale out when you need **more read
+throughput**, **high availability**, or a **dataset bigger than one machine's RAM**.
+
+---
+
+## 1. Replication (primary + replicas)
+One **primary** accepts writes and asynchronously copies its data to one or more
+**replicas**. Replicas serve reads, giving you read scaling and a warm standby.
+
+```
+            writes
+   App ───────────────▶ ┌──────────┐
+                        │ PRIMARY  │
+                        └────┬─────┘
+                  async repl │
+                  ┌──────────┼──────────┐
+              ┌───▼───┐  ┌───▼───┐  ┌───▼───┐
+              │replica│  │replica│  │replica│  ◀── reads
+              └───────┘  └───────┘  └───────┘
+```
+
+```bash
+# On a replica:
+REPLICAOF primary-host 6379
+# Inspect:
+INFO replication        # role:master/slave, connected_slaves, lag
+```
+
+**Key facts:**
+- Replication is **asynchronous** → replicas can be slightly behind (eventual consistency).
+- Replicas are **read-only** by default.
+- It gives redundancy but **not automatic failover** — if the primary dies, *something*
+  must promote a replica. That's what Sentinel/Cluster add.
+
+**Use for:** scaling reads, hot standby, running analytics off a replica.
+
+---
+
+## 2. Sentinel — high availability
+Redis **Sentinel** is a separate process that **monitors** your primary and replicas, and
+**automatically fails over**: if the primary goes down, Sentinel promotes a replica and
+tells clients the new address. Run an odd number (≥3) of Sentinels for quorum.
+
+```conf
+# sentinel.conf
+sentinel monitor mymaster 127.0.0.1 6379 2   # 2 = quorum needed to declare failure
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+```
+
+**Use for:** a single dataset that fits in RAM but needs to survive a node failure with
+no manual intervention.
+
+### Node.js with Sentinel
+The client connects **through** Sentinels and is handed the current primary:
+```js
+// node-redis v4+
+const client = createClient({
+  sentinels: [
+    { host: 'sentinel-1', port: 26379 },
+    { host: 'sentinel-2', port: 26379 },
+    { host: 'sentinel-3', port: 26379 },
+  ],
+  name: 'mymaster',          // the monitored set's name
+});
+```
+(With **ioredis**, pass `{ sentinels: [...], name: 'mymaster' }` to `new Redis(...)`.)
+
+---
+
+## 3. Cluster — horizontal sharding
+When the dataset is **too big for one machine** (or write throughput exceeds one node),
+Redis **Cluster** shards data across multiple primaries. The keyspace is divided into
+**16384 hash slots**; each primary owns a range, and each primary can have replicas for HA.
+
+```
+   16384 hash slots split across primaries
+   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+   │ Primary A   │  │ Primary B   │  │ Primary C   │
+   │ slots 0-5460│  │ 5461-10922  │  │ 10923-16383 │
+   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       replica A         replica B        replica C
+```
+
+Which slot a key lands in: `CRC16(key) mod 16384`. The cluster redirects clients to the
+right node automatically.
+
+```bash
+CLUSTER INFO
+CLUSTER NODES
+CLUSTER KEYSLOT user:1000
+```
+
+### Multi-key operations & hash tags
+In Cluster, a multi-key command (`MGET`, `MULTI`, Lua over several keys) only works if all
+keys live in the **same slot**. Force that with a **hash tag** — the part in `{...}` is
+what's hashed:
+```bash
+SET {user:1000}:profile  "..."
+SET {user:1000}:sessions "..."
+# both hash on "user:1000" → same slot → can be used together
+```
+
+### Node.js with Cluster
+```js
+import { createCluster } from 'redis';
+
+const cluster = createCluster({
+  rootNodes: [
+    { url: 'redis://node-1:6379' },
+    { url: 'redis://node-2:6379' },
+    { url: 'redis://node-3:6379' },
+  ],
+});
+cluster.on('error', (e) => console.error(e));
+await cluster.connect();
+await cluster.set('{user:1000}:name', 'Ada');
+```
+(With **ioredis**: `new Redis.Cluster([{ host, port }, ...])`.)
+
+---
+
+## Which do I need?
+| Goal | Solution |
+|------|----------|
+| Scale **reads** | Replication (read replicas) |
+| Survive a node failure automatically | **Sentinel** (or Cluster) |
+| Dataset bigger than one machine's RAM | **Cluster** (sharding) |
+| Very high write throughput | **Cluster** |
+| Just want it managed | ElastiCache / Redis Cloud / Upstash |
+
+> **Don't over-engineer.** A single well-provisioned Redis (with persistence + backups)
+> serves the vast majority of apps. Add replication for HA, and only reach for Cluster when
+> one node genuinely can't hold the data or the write load.
+
+## Common pitfalls
+- ❌ Reading from a replica and expecting immediate consistency — replication lags.
+- ❌ Multi-key ops across slots in Cluster — use **hash tags** or redesign keys.
+- ❌ Assuming replication alone gives failover — it doesn't; add Sentinel/Cluster.
+- ❌ Even number of Sentinels — you want an odd number for quorum.
+
+## Best practices
+- ✅ Start single-node + replicas; introduce Sentinel/Cluster only when justified.
+- ✅ In Cluster, group related keys with `{hash-tags}`.
+- ✅ Prefer a **managed** Redis unless you have ops capacity to run HA yourself.
+- ✅ Monitor replication lag and failover events.
+
+## Try it yourself
+1. Spin up a primary + replica with Docker (`REPLICAOF` on the replica) and confirm a write
+   on the primary appears on the replica via `INFO replication`.
+2. `CLUSTER KEYSLOT user:1000` vs `CLUSTER KEYSLOT {user:1000}:name` — observe the hash-tag
+   effect.
+
+➡️ Next: [Node.js in Production](./10-nodejs-production.mdx)

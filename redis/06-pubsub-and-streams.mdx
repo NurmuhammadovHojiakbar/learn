@@ -1,0 +1,194 @@
+---
+title: Pub/Sub & Streams
+order: 6
+description: Real-time messaging with Pub/Sub, and durable event logs with Streams and consumer groups — including Node.js examples.
+---
+
+# Pub/Sub & Streams
+
+## What you'll learn
+- Fire-and-forget messaging with **Pub/Sub**
+- Durable, replayable event logs with **Streams**
+- **Consumer groups** for scaling work across multiple workers
+- When to choose which (and when to reach for a real queue)
+
+Redis offers two messaging models. They look similar but behave very differently.
+
+---
+
+## Pub/Sub — fire-and-forget broadcasting
+Publishers send messages to **channels**; every currently-subscribed client receives them.
+Messages are **not stored** — if no one is listening, the message is gone. There's no
+history, no acknowledgement, no replay.
+
+```bash
+# Terminal 1 — subscribe
+SUBSCRIBE news
+
+# Terminal 2 — publish
+PUBLISH news "Redis 7.4 released!"
+# Subscribers in Terminal 1 receive it instantly
+
+# Pattern subscriptions
+PSUBSCRIBE news.*        # matches news.tech, news.sports, ...
+```
+
+**Use for:** live notifications, chat fan-out, cache-invalidation signals, presence —
+anything where missing a message during downtime is acceptable.
+
+### Pub/Sub in Node.js
+A subscriber connection can't run normal commands, so you **duplicate** the client:
+
+```js
+import client from './redisClient.js';
+
+const subscriber = client.duplicate();
+await subscriber.connect();
+
+// Listen
+await subscriber.subscribe('news', (message, channel) => {
+  console.log(`[${channel}] ${message}`);
+});
+
+// Publish (from the main client)
+await client.publish('news', JSON.stringify({ title: 'Hello', ts: Date.now() }));
+
+// Pattern subscribe
+await subscriber.pSubscribe('news.*', (message, channel) => {
+  console.log(`pattern ${channel}:`, message);
+});
+```
+
+> **Important:** Pub/Sub messages are lost if a subscriber is disconnected. For anything
+> that must not be missed, use **Streams** below.
+
+---
+
+## Streams — durable, replayable logs
+A Stream is an append-only log. Each entry gets a unique, time-ordered ID and a set of
+field/value pairs. Entries **persist**, so consumers can read history, resume after a
+crash, and acknowledge processing.
+
+```bash
+# Append (XADD). * = let Redis assign the ID (timestamp-seq)
+XADD orders * userId 1000 amount 49.99
+# -> "1718200000000-0"
+
+XLEN orders                     # number of entries
+XRANGE orders - +               # read all (− = min, + = max)
+XREAD COUNT 10 STREAMS orders 0 # read from the beginning
+# Block waiting for NEW entries after the last ID we saw:
+XREAD BLOCK 5000 STREAMS orders $
+```
+
+### Streams in Node.js (simple consumer)
+```js
+let lastId = '$'; // '$' = only messages added from now on
+while (true) {
+  const res = await client.xRead(
+    { key: 'orders', id: lastId },
+    { COUNT: 10, BLOCK: 5000 }   // block up to 5s waiting for new entries
+  );
+  if (!res) continue;            // timed out, loop again
+  for (const { messages } of res) {
+    for (const { id, message } of messages) {
+      console.log('order', id, message);
+      lastId = id;               // advance past what we processed
+    }
+  }
+}
+```
+
+---
+
+## Consumer groups — scaling work across workers
+The real power of Streams. A **consumer group** lets multiple workers split the entries
+of one stream so each message is processed by exactly **one** member of the group, with
+**acknowledgements** and automatic tracking of pending (un-acked) messages.
+
+```bash
+# Create a group starting at the end of the stream ($)
+XGROUP CREATE orders workers $ MKSTREAM
+
+# A worker reads new messages assigned to it (> = undelivered)
+XREADGROUP GROUP workers worker-1 COUNT 1 BLOCK 5000 STREAMS orders >
+
+# After processing, acknowledge so it won't be redelivered
+XACK orders workers 1718200000000-0
+
+# See messages delivered but not yet acked (for crash recovery)
+XPENDING orders workers
+# Claim a stuck message from a dead worker
+XCLAIM orders workers worker-2 60000 1718200000000-0
+```
+
+### Consumer group worker in Node.js
+```js
+const GROUP = 'workers';
+const CONSUMER = `worker-${process.pid}`;
+
+// Create the group once (ignore "BUSYGROUP" if it already exists)
+try {
+  await client.xGroupCreate('orders', GROUP, '$', { MKSTREAM: true });
+} catch (e) {
+  if (!e.message.includes('BUSYGROUP')) throw e;
+}
+
+while (true) {
+  const res = await client.xReadGroup(
+    GROUP, CONSUMER,
+    { key: 'orders', id: '>' },     // > = new, never-delivered messages
+    { COUNT: 1, BLOCK: 5000 }
+  );
+  if (!res) continue;
+  for (const { messages } of res) {
+    for (const { id, message } of messages) {
+      try {
+        await processOrder(message);
+        await client.xAck('orders', GROUP, id);   // mark done
+      } catch (err) {
+        console.error('failed', id, err);          // stays pending → retried/claimed
+      }
+    }
+  }
+}
+```
+
+This gives you an **at-least-once**, crash-resilient job queue built into Redis.
+
+---
+
+## Pub/Sub vs Streams — which one?
+| | Pub/Sub | Streams |
+|--|---------|---------|
+| Message stored? | No | Yes (append-only) |
+| Missed if offline? | Yes | No — read history later |
+| Acknowledge / retry? | No | Yes (consumer groups) |
+| Multiple consumers | All get every message | Group splits work; or fan-out |
+| Best for | Live, ephemeral signals | Durable events / job processing |
+
+> Need a full-featured job queue (retries, delays, priorities, scheduling, dashboards)?
+> Use **BullMQ** (built on Redis) — see [Lesson 10](./10-nodejs-production.mdx). Roll your
+> own with Streams only when you want minimal dependencies.
+
+---
+
+## Common pitfalls
+- ❌ Using Pub/Sub for jobs that must not be lost — use Streams.
+- ❌ Forgetting to `XACK` — pending entries pile up forever.
+- ❌ Running commands on a subscriber connection — duplicate the client for subscribing.
+- ❌ Letting a stream grow unbounded — cap it with `XADD orders MAXLEN ~ 10000 * ...`.
+
+## Best practices
+- ✅ Cap stream length with `MAXLEN ~` (approximate trimming is cheap).
+- ✅ One consumer name per worker process; reuse it so `XPENDING` recovery works.
+- ✅ Handle `BUSYGROUP` when creating groups idempotently at startup.
+
+## Try it yourself
+1. Open two `redis-cli` windows; `SUBSCRIBE chat` in one and `PUBLISH chat "hi"` in the
+   other.
+2. Build an `orders` stream consumer group with two Node workers and confirm each order is
+   processed by only one worker.
+3. Kill a worker mid-process and use `XPENDING` + `XCLAIM` to reassign its message.
+
+➡️ Next: [Transactions & Scripting](./07-transactions-and-scripting.mdx)

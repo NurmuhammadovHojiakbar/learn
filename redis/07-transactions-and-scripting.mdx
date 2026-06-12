@@ -1,0 +1,181 @@
+---
+title: Transactions & Scripting
+order: 7
+description: Atomic multi-command operations with MULTI/EXEC, optimistic locking with WATCH, batching with pipelines, and server-side logic with Lua scripts.
+---
+
+# Transactions, Pipelines & Lua Scripting
+
+## What you'll learn
+- Grouping commands atomically with **MULTI/EXEC**
+- Optimistic locking with **WATCH** (check-and-set)
+- **Pipelining** to cut network round-trips
+- Running atomic server-side logic with **Lua scripts**
+
+---
+
+## Transactions: MULTI / EXEC
+Redis transactions queue commands and run them **as one atomic unit** — no other client's
+commands interleave between them. They start with `MULTI` and run on `EXEC`.
+
+```bash
+MULTI
+SET account:a 100
+SET account:b 50
+INCRBY account:a -25
+INCRBY account:b 25
+EXEC               # all four execute atomically; returns array of results
+```
+
+`DISCARD` cancels a queued transaction. Note: Redis transactions are **not** like SQL —
+there's no rollback on logical errors. If a command fails at runtime (e.g. wrong type),
+the others still run. They guarantee **isolation + atomic execution**, not rollback.
+
+### In Node.js
+node-redis exposes transactions via `multi()` + `exec()`:
+```js
+const results = await client
+  .multi()
+  .set('account:a', 100)
+  .incrBy('account:a', -25)
+  .incrBy('account:b', 25)
+  .exec();
+// results -> array of each command's reply
+```
+
+---
+
+## Optimistic locking with WATCH
+`WATCH` marks keys; if any watched key is modified by someone else before your `EXEC`,
+the transaction **aborts** (returns nil) and you retry. This is a lock-free
+**check-and-set** pattern — perfect for "read, decide, write" without races.
+
+Classic example: safely decrement stock only if it's available.
+```js
+async function purchase(productId) {
+  const key = `stock:${productId}`;
+  while (true) {
+    await client.watch(key);                 // watch for concurrent changes
+    const stock = Number(await client.get(key));
+    if (stock <= 0) {
+      await client.unwatch();
+      return { ok: false, reason: 'out of stock' };
+    }
+    const res = await client
+      .multi()
+      .decr(key)
+      .exec();                                // null if `key` changed since WATCH
+    if (res !== null) return { ok: true, remaining: stock - 1 };
+    // someone else bought concurrently → loop and retry
+  }
+}
+```
+
+> For a simple counter, prefer the atomic `DECR` directly. Use `WATCH` when the decision
+> logic is more complex than a single atomic command can express.
+
+---
+
+## Pipelining — fewer round-trips
+Pipelining sends many commands at once **without** waiting for each reply, then reads all
+replies together. Unlike `MULTI`, it's not atomic — it's purely a **performance**
+optimization that eliminates per-command network latency.
+
+```js
+// Without pipelining: N round-trips
+for (let i = 0; i < 1000; i++) await client.set(`k:${i}`, i); // slow
+
+// With pipelining: 1 round-trip
+const pipeline = client.multi();          // node-redis batches these
+for (let i = 0; i < 1000; i++) pipeline.set(`k:${i}`, i);
+await pipeline.exec();                     // sent together
+```
+For thousands of independent writes, pipelining can be **10–100× faster** than
+sequential `await`s.
+
+> In node-redis, `multi()` both queues atomically (with `MULTI/EXEC`) and pipelines on the
+> wire. If you only want pipelining without transaction semantics, batch with
+> `Promise.all([...])` of individual commands, which the client also pipelines.
+
+---
+
+## Lua scripting — atomic custom logic
+For logic that must be **atomic** but is more than one command, run a **Lua script** on the
+server. The whole script executes atomically (nothing interleaves), and it runs *next to*
+the data — no round-trips mid-logic.
+
+```bash
+# KEYS[] and ARGV[] are passed in; numkeys says how many KEYS there are
+EVAL "return redis.call('SET', KEYS[1], ARGV[1])" 1 mykey myvalue
+```
+
+### Example: atomic "rate limit" — increment and set TTL only on first hit
+```lua
+-- rate_limit.lua
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+```
+
+In Node.js, prefer `EVALSHA` (run by script hash) so you don't resend the source every
+time. node-redis makes this easy with `defineScript`:
+```js
+import { createClient, defineScript } from 'redis';
+
+const client = createClient({
+  scripts: {
+    rateLimit: defineScript({
+      NUMBER_OF_KEYS: 1,
+      SCRIPT: `
+        local current = redis.call('INCR', KEYS[1])
+        if current == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+        return current`,
+      transformArguments(key, windowSeconds) {
+        return [key, String(windowSeconds)];
+      },
+    }),
+  },
+});
+await client.connect();
+
+const count = await client.rateLimit(`rl:user:1000`, 60);
+if (count > 100) throw new Error('Rate limit exceeded');
+```
+
+Redis caches the script after first use and runs it by SHA on later calls.
+
+> Modern Redis (7+) also supports **Functions** (`FUNCTION LOAD`) — persistent, named
+> server-side libraries. Lua `EVAL`/`EVALSHA` remains the most widely used approach.
+
+---
+
+## When to use what
+| Need | Use |
+|------|-----|
+| Run a few commands atomically | `MULTI/EXEC` |
+| Read-decide-write without locks | `WATCH` + `MULTI` |
+| Send many commands fast | Pipeline / `Promise.all` |
+| Atomic custom logic (loops, conditionals) | **Lua** `EVAL`/`EVALSHA` |
+
+## Common pitfalls
+- ❌ Expecting SQL-style rollback — Redis transactions don't roll back on logic errors.
+- ❌ Doing read-modify-write in app code without `WATCH` → race conditions.
+- ❌ Re-sending full Lua source every call instead of `EVALSHA`.
+- ❌ Long-running Lua scripts — they block the single thread for everyone. Keep them fast.
+
+## Best practices
+- ✅ Use atomic single commands (`INCR`, `SETNX`) before reaching for transactions.
+- ✅ Use `WATCH` retry loops for compare-and-swap workflows.
+- ✅ Pipeline bulk operations.
+- ✅ Keep Lua scripts short and deterministic; pass keys via `KEYS[]`, not hardcoded.
+
+## Try it yourself
+1. Model a transfer between `account:a` and `account:b` with `MULTI/EXEC`; verify the sum
+   is unchanged.
+2. Implement the `purchase` WATCH loop and hammer it with concurrent calls to confirm stock
+   never goes negative.
+3. Implement the Lua rate-limiter and confirm the 101st call within 60s is rejected.
+
+➡️ Next: [Persistence & Reliability](./08-persistence-and-reliability.mdx)
