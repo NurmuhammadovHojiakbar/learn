@@ -1,0 +1,50 @@
+# Node + Postgres + Redis stack for the PostgreSQL course (Lesson 07).
+#   docker compose up -d
+#   curl localhost:3000/users/1                     -> source: postgres, then: cache
+#   curl localhost:3000/users/1/summary             -> order count + total spent
+#   curl -X POST localhost:3000/orders \
+#        -H 'content-type: application/json' \
+#        -d '{"userId":1,"items":[{"productId":2,"qty":2}]}'   -> transactional order
+#
+# schema.sql + seed.sql run automatically on first start via docker-entrypoint-initdb.d.
+
+services:
+  app:
+    build: ./app
+    environment:
+      DATABASE_URL: postgresql://postgres:secret@postgres:5432/appdb
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro    # schema.sql + seed.sql run on first init
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pg-data:

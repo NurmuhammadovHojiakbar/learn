@@ -1,0 +1,178 @@
+---
+title: Indexing & Performance
+order: 5
+description: Make queries fast — how indexes work, the index types, reading EXPLAIN/EXPLAIN ANALYZE, and avoiding common performance traps like N+1.
+---
+
+# Indexing & Performance
+
+## What you'll learn
+- How **indexes** speed up queries (and cost writes)
+- The main index types and when to use each
+- Reading query plans with **EXPLAIN / EXPLAIN ANALYZE**
+- Common performance traps (N+1, missing indexes, `SELECT *`)
+
+---
+
+## Why indexes?
+Without an index, finding rows means a **sequential scan** — reading the whole table. An
+**index** is a sorted data structure (like a book's index) that lets Postgres jump straight
+to matching rows.
+
+```sql
+-- This scans every user row to find one email:
+SELECT * FROM users WHERE email = 'ada@example.com';
+
+-- Add an index and it becomes a fast lookup:
+CREATE INDEX idx_users_email ON users (email);
+```
+On a million-row table, that's the difference between milliseconds and seconds.
+
+> `PRIMARY KEY` and `UNIQUE` columns are indexed automatically. Foreign key **columns are
+> not** — you usually want to index them yourself (see below).
+
+---
+
+## What to index
+Index columns you frequently **filter, join, or sort** on:
+```sql
+CREATE INDEX idx_orders_user_id  ON orders (user_id);     -- you join/filter on this a lot
+CREATE INDEX idx_orders_created  ON orders (created_at);  -- for date-range queries & sorting
+```
+
+### Composite (multi-column) indexes
+An index on several columns helps queries that filter on a **left-to-right prefix**:
+```sql
+CREATE INDEX idx_orders_user_created ON orders (user_id, created_at);
+-- helps: WHERE user_id = 1
+-- helps: WHERE user_id = 1 AND created_at > '2026-01-01'
+-- helps: WHERE user_id = 1 ORDER BY created_at
+-- does NOT help: WHERE created_at > '...'   (user_id not specified — wrong prefix)
+```
+Order matters: put the most selective / most-often-filtered column first.
+
+### Partial & expression indexes
+```sql
+-- index only active users (smaller, faster, if you usually query active ones)
+CREATE INDEX idx_users_active ON users (email) WHERE is_active = true;
+
+-- index a computed value so case-insensitive lookups use an index
+CREATE INDEX idx_users_lower_email ON users (lower(email));
+SELECT * FROM users WHERE lower(email) = 'ada@example.com';
+```
+
+---
+
+## Index types
+| Type | Use for |
+|------|---------|
+| **B-tree** (default) | equality & range (`=`, `<`, `>`, `BETWEEN`, `ORDER BY`) — 95% of cases |
+| **Hash** | equality only (rarely needed; B-tree usually fine) |
+| **GIN** | `jsonb`, arrays, full-text search (`@>`, contains) |
+| **GiST** | geometric / range / nearest-neighbor (PostGIS) |
+| **BRIN** | huge, naturally-ordered tables (e.g. append-only by time) — tiny index |
+
+Default to **B-tree**; reach for **GIN** when you index `jsonb`/arrays/full-text
+(Lesson 08).
+
+---
+
+## The cost of indexes
+Indexes aren't free:
+- They **speed up reads** but **slow down writes** (every `INSERT`/`UPDATE`/`DELETE` must
+  update the indexes too).
+- They **use disk space**.
+- Unused indexes are pure overhead.
+
+> So: index what your queries actually need — not every column. Measure with `EXPLAIN`, and
+> drop indexes nothing uses (`pg_stat_user_indexes` shows usage counts).
+
+---
+
+## EXPLAIN — see the query plan
+`EXPLAIN` shows **how** Postgres will run a query; `EXPLAIN ANALYZE` actually runs it and
+reports **real timing and row counts**.
+```sql
+EXPLAIN ANALYZE
+SELECT * FROM orders WHERE user_id = 1;
+```
+Example output (before an index):
+```
+Seq Scan on orders  (cost=0.00..18.50 rows=5 width=...) (actual time=0.40..3.20 rows=5 ...)
+  Filter: (user_id = 1)
+  Rows Removed by Filter: 9995
+```
+`Seq Scan` + "Rows Removed by Filter: 9995" = it read the whole table. After
+`CREATE INDEX idx_orders_user_id ON orders(user_id);`:
+```
+Index Scan using idx_orders_user_id on orders  (actual time=0.03..0.05 rows=5 ...)
+  Index Cond: (user_id = 1)
+```
+`Index Scan` = it used the index. 
+
+### Reading a plan
+- **Seq Scan** — full table read. Fine for tiny tables; a red flag on big ones with a
+  selective filter.
+- **Index Scan / Index Only Scan** — used an index. Usually what you want.
+- **actual time** and **rows** — where the real cost is; find the most expensive node.
+- A mismatch between estimated and actual `rows` can mean stale statistics — run `ANALYZE`.
+
+---
+
+## Common performance traps
+
+### N+1 queries (the app-side classic)
+Fetching a list, then querying once **per item** in a loop:
+```js
+const users = await db.query('SELECT * FROM users');        // 1 query
+for (const u of users) {
+  u.orders = await db.query('SELECT * FROM orders WHERE user_id = $1', [u.id]); // N queries
+}
+```
+That's 1 + N round-trips. Replace with a single join or a `WHERE user_id = ANY($1)`:
+```sql
+SELECT * FROM orders WHERE user_id = ANY($1);   -- one query for all users' orders
+```
+
+### Other traps
+- **Missing index** on a filtered/joined column → seq scans.
+- **`SELECT *`** → fetching and transferring columns you don't need.
+- **Functions on indexed columns** in `WHERE` (`WHERE lower(email) = ...` without an
+  expression index) → the index can't be used.
+- **Deep `OFFSET` pagination** → use keyset pagination ([Lesson 02](./02-sql-fundamentals.mdx)).
+
+---
+
+## Keeping stats fresh
+Postgres plans using table statistics. `autovacuum` usually keeps them current, but after
+big data changes you can refresh manually:
+```sql
+ANALYZE orders;        -- update planner statistics
+VACUUM ANALYZE orders; -- reclaim space + update stats
+```
+
+---
+
+## Common pitfalls
+- ❌ Indexing everything → slow writes, wasted space.
+- ❌ No index on foreign-key / frequently-filtered columns → seq scans.
+- ❌ Wrapping an indexed column in a function without an expression index.
+- ❌ Guessing instead of measuring — always `EXPLAIN ANALYZE`.
+- ❌ N+1 query loops in app code.
+
+## Best practices
+- ✅ Index columns you filter, join, or sort on (including FK columns).
+- ✅ Use composite indexes matching your query's filter/sort prefix.
+- ✅ `EXPLAIN ANALYZE` real queries; aim to replace Seq Scans on big tables.
+- ✅ Fetch only needed columns; batch instead of looping (kill N+1).
+- ✅ Periodically drop unused indexes.
+
+## Try it yourself
+1. Insert ~10k orders, run `EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 1;` and
+   note the **Seq Scan**.
+2. Add `idx_orders_user_id`, rerun, and confirm it switches to an **Index Scan** (and is far
+   faster).
+3. Find an N+1 pattern in the [example app](./07-postgres-with-nodejs.mdx) and rewrite it as
+   a single join.
+
+➡️ Next: [Transactions & Concurrency](./06-transactions-and-concurrency.mdx)

@@ -1,0 +1,162 @@
+---
+title: SQL Fundamentals
+order: 2
+description: Create tables and read/write data — data types, INSERT/SELECT/UPDATE/DELETE, filtering, sorting, and pagination.
+---
+
+# SQL Fundamentals
+
+## What you'll learn
+- Creating tables and choosing **data types**
+- The four CRUD operations: `INSERT`, `SELECT`, `UPDATE`, `DELETE`
+- Filtering (`WHERE`), sorting (`ORDER BY`), and pagination (`LIMIT`/`OFFSET`)
+- `RETURNING` and upserts
+
+---
+
+## Creating a table
+```sql
+CREATE TABLE users (
+    id          serial PRIMARY KEY,         -- auto-incrementing integer id
+    name        text NOT NULL,
+    email       text UNIQUE NOT NULL,       -- no two users share an email
+    age         integer,
+    is_active   boolean DEFAULT true,
+    created_at  timestamptz DEFAULT now()   -- timestamp with time zone
+);
+```
+`serial` auto-increments; `NOT NULL` forbids missing values; `UNIQUE` prevents duplicates;
+`DEFAULT` supplies a value when you don't.
+
+> Modern Postgres also offers `id bigint GENERATED ALWAYS AS IDENTITY` as a standards-based
+> alternative to `serial` — either is fine; `serial` is shown here for familiarity.
+
+---
+
+## Common data types
+| Type | Use for |
+|------|---------|
+| `integer` / `bigint` | whole numbers |
+| `numeric(10,2)` | exact decimals (money!) — never use float for currency |
+| `real` / `double precision` | approximate floats |
+| `text` / `varchar(n)` | strings (prefer `text` unless you need a length cap) |
+| `boolean` | true/false |
+| `date` / `timestamptz` | dates / timestamps (**prefer `timestamptz`**) |
+| `uuid` | universally unique ids |
+| `jsonb` | structured/semi-structured JSON (Lesson 08) |
+| `text[]` | arrays |
+
+> Use `timestamptz` (not `timestamp`) so times are stored unambiguously in UTC. Use
+> `numeric` for money to avoid floating-point rounding errors.
+
+---
+
+## INSERT — create rows
+```sql
+INSERT INTO users (name, email, age)
+VALUES ('Ada Lovelace', 'ada@example.com', 36);
+
+-- multiple rows at once
+INSERT INTO users (name, email) VALUES
+  ('Linus', 'linus@example.com'),
+  ('Grace', 'grace@example.com');
+
+-- get the generated id back
+INSERT INTO users (name, email) VALUES ('Alan', 'alan@example.com')
+RETURNING id, created_at;
+```
+`RETURNING` hands back columns from the inserted row — invaluable for getting the new `id`
+without a second query.
+
+---
+
+## SELECT — read rows
+```sql
+SELECT * FROM users;                       -- all columns (avoid in app code)
+SELECT id, name, email FROM users;         -- specific columns (preferred)
+SELECT name AS full_name FROM users;       -- alias a column
+SELECT DISTINCT age FROM users;            -- unique values
+SELECT count(*) FROM users;                -- how many rows
+```
+> `SELECT *` is fine when exploring, but in application code list the columns you need — it's
+> clearer, faster, and won't break when the schema changes.
+
+### Filtering with WHERE
+```sql
+SELECT * FROM users WHERE age >= 21;
+SELECT * FROM users WHERE is_active = true AND age < 40;
+SELECT * FROM users WHERE name LIKE 'A%';          -- starts with A (case-sensitive)
+SELECT * FROM users WHERE name ILIKE 'a%';         -- case-insensitive
+SELECT * FROM users WHERE age BETWEEN 20 AND 30;
+SELECT * FROM users WHERE email IN ('ada@example.com', 'grace@example.com');
+SELECT * FROM users WHERE age IS NULL;             -- NULL needs IS, not = (see below)
+```
+
+### NULL is special
+`NULL` means "unknown," so `age = NULL` is never true — use `IS NULL` / `IS NOT NULL`.
+```sql
+SELECT * FROM users WHERE age IS NULL;       -- ✅
+SELECT * FROM users WHERE age = NULL;        -- ❌ returns nothing, ever
+```
+
+### Sorting & pagination
+```sql
+SELECT * FROM users ORDER BY created_at DESC;          -- newest first
+SELECT * FROM users ORDER BY age ASC, name ASC;        -- multi-column
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 20;    -- page 3 (rows 21–30)
+```
+> `LIMIT/OFFSET` is simple pagination but slows down on deep pages. For large datasets,
+> prefer **keyset pagination** (`WHERE id > $lastId ORDER BY id LIMIT 10`).
+
+---
+
+## UPDATE — change rows
+```sql
+UPDATE users SET age = 37 WHERE id = 1;
+UPDATE users SET is_active = false WHERE created_at < now() - interval '1 year';
+UPDATE users SET name = 'Ada L.' WHERE id = 1 RETURNING *;
+```
+> ⚠️ **Always include a `WHERE`** on `UPDATE`/`DELETE`. Without it you change/delete *every
+> row*. Run a `SELECT` with the same `WHERE` first to preview what you'll affect.
+
+---
+
+## DELETE — remove rows
+```sql
+DELETE FROM users WHERE id = 5;
+DELETE FROM users WHERE is_active = false;
+-- TRUNCATE users;     -- empties the whole table fast (no per-row WHERE)
+```
+
+---
+
+## Upsert — insert or update
+Handle "create it, or update if it already exists" atomically with `ON CONFLICT`:
+```sql
+INSERT INTO users (email, name)
+VALUES ('ada@example.com', 'Ada Lovelace')
+ON CONFLICT (email)                       -- the UNIQUE column that may collide
+DO UPDATE SET name = EXCLUDED.name;        -- EXCLUDED = the row you tried to insert
+```
+
+---
+
+## Common pitfalls
+- ❌ `UPDATE`/`DELETE` without `WHERE` → you change every row.
+- ❌ `= NULL` instead of `IS NULL`.
+- ❌ `float`/`real` for money → rounding errors; use `numeric`.
+- ❌ `timestamp` instead of `timestamptz` → time-zone bugs.
+- ❌ `SELECT *` in app code → fragile and over-fetching.
+
+## Best practices
+- ✅ Preview `UPDATE`/`DELETE` with a matching `SELECT` first.
+- ✅ Use `RETURNING` to get generated values in one round-trip.
+- ✅ `numeric` for money, `timestamptz` for time, `text` for strings.
+- ✅ Keyset pagination for large tables.
+
+## Try it yourself
+1. Create the `users` table, insert four users (one with `RETURNING id`).
+2. Query active users over 21, sorted newest-first, 2 per page.
+3. Upsert a user by email, then verify the row updated rather than duplicating.
+
+➡️ Next: [Schema Design & Relationships](./03-schema-design.mdx)

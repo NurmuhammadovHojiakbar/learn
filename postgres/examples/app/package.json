@@ -1,0 +1,15 @@
+{
+  "name": "postgres-demo",
+  "version": "1.0.0",
+  "description": "Express + Postgres (pg) + Redis cache-aside app for the PostgreSQL course",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0"
+  }
+}

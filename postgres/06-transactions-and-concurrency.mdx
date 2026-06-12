@@ -1,0 +1,160 @@
+---
+title: Transactions & Concurrency
+order: 6
+description: Keep data correct under concurrent access — ACID, BEGIN/COMMIT/ROLLBACK, isolation levels, locking, and avoiding race conditions.
+---
+
+# Transactions & Concurrency
+
+## What you'll learn
+- What a **transaction** is and the **ACID** guarantees
+- `BEGIN` / `COMMIT` / `ROLLBACK`
+- **Isolation levels** and the anomalies they prevent
+- **Locking** and how to avoid race conditions and deadlocks
+
+This is what makes a relational database trustworthy for money and orders: correct results
+even when many clients write at once.
+
+---
+
+## What is a transaction?
+A **transaction** groups multiple statements into one **all-or-nothing** unit. Either every
+statement commits, or none do. The classic example — transfer money between accounts:
+```sql
+BEGIN;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+  UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;     -- both happen together
+```
+If the second `UPDATE` failed, you'd `ROLLBACK` and **neither** change persists — money is
+never lost or created.
+```sql
+BEGIN;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+  -- something went wrong...
+ROLLBACK;   -- undo everything since BEGIN
+```
+
+---
+
+## ACID
+| Property | Guarantee |
+|----------|-----------|
+| **Atomicity** | All statements succeed or none do (no partial writes) |
+| **Consistency** | Constraints/foreign keys always hold after a transaction |
+| **Isolation** | Concurrent transactions don't corrupt each other |
+| **Durability** | Once committed, data survives a crash (written to disk) |
+
+ACID is exactly what Redis-as-cache *doesn't* fully provide — and why durable, related data
+belongs in Postgres.
+
+---
+
+## Concurrency anomalies
+When transactions run at the same time, several problems can occur if isolation is too weak:
+- **Dirty read** — reading another transaction's *uncommitted* changes.
+- **Non-repeatable read** — re-reading a row and getting a different value (someone updated
+  it between your reads).
+- **Phantom read** — re-running a query and getting *different rows* (someone inserted/
+  deleted matching rows).
+- **Lost update** — two transactions read-modify-write the same row; one overwrites the
+  other.
+
+**Isolation levels** control which of these can happen.
+
+---
+
+## Isolation levels
+```sql
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+  -- ... statements ...
+COMMIT;
+```
+| Level | Prevents | Notes |
+|-------|----------|-------|
+| `READ COMMITTED` | dirty reads | **Postgres default**; each statement sees the latest committed data |
+| `REPEATABLE READ` | + non-repeatable & phantom reads | a consistent snapshot for the whole transaction |
+| `SERIALIZABLE` | + everything (acts as if transactions ran one-by-one) | strongest; may abort with a serialization error to retry |
+
+> Postgres uses **MVCC** (Multi-Version Concurrency Control): readers don't block writers and
+> writers don't block readers — each transaction sees a consistent snapshot. The default
+> `READ COMMITTED` is fine for most apps; step up to `REPEATABLE READ`/`SERIALIZABLE` for
+> logic sensitive to concurrent changes.
+
+---
+
+## Avoiding the lost-update race
+"Read a value, decide, write it back" is racy if two transactions interleave. Three fixes:
+
+**1. Do it in one atomic statement** (best when possible):
+```sql
+-- no read-modify-write in app code; the database computes atomically
+UPDATE products SET stock = stock - 1 WHERE id = 42 AND stock > 0;
+-- check "rows affected": 0 means it was out of stock
+```
+
+**2. Lock the row with `SELECT ... FOR UPDATE`** (pessimistic):
+```sql
+BEGIN;
+  SELECT stock FROM products WHERE id = 42 FOR UPDATE;  -- locks the row
+  -- ... decide in app code; other txns wait for this row ...
+  UPDATE products SET stock = stock - 1 WHERE id = 42;
+COMMIT;
+```
+`FOR UPDATE` makes concurrent transactions wait until you commit, preventing the race.
+
+**3. Optimistic concurrency** with a version column:
+```sql
+UPDATE products SET stock = stock - 1, version = version + 1
+WHERE id = 42 AND version = $expectedVersion;   -- 0 rows = someone else changed it; retry
+```
+
+> This mirrors the [Redis `WATCH`](../redis/07-transactions-and-scripting.mdx) pattern —
+> same problem, relational tools.
+
+---
+
+## Deadlocks
+A **deadlock** is when two transactions each hold a lock the other needs. Postgres detects
+it and aborts one with an error.
+```
+ERROR: deadlock detected
+```
+**Avoid them by acquiring locks in a consistent order** across your code (e.g. always lock
+the lower `id` first), keeping transactions short, and being ready to retry the aborted one.
+
+---
+
+## Keep transactions short
+A transaction holds locks and a snapshot until it commits. Long-running transactions block
+others and bloat the database (old row versions can't be cleaned up). **Don't** do slow work
+(HTTP calls, user think-time) inside a transaction — gather what you need, then run a quick
+`BEGIN…COMMIT`.
+
+---
+
+## Common pitfalls
+- ❌ Read-modify-write in app code without a lock or atomic update → lost updates.
+- ❌ Long transactions spanning network calls → lock contention and bloat.
+- ❌ Acquiring locks in inconsistent orders → deadlocks.
+- ❌ Assuming `SERIALIZABLE` everywhere is "safer" without handling serialization-failure
+  retries.
+- ❌ Forgetting to `COMMIT`/`ROLLBACK` (especially in app code) → idle-in-transaction locks.
+
+## Best practices
+- ✅ Wrap multi-statement invariants in a transaction.
+- ✅ Prefer a single atomic `UPDATE ... WHERE` over read-modify-write.
+- ✅ Use `FOR UPDATE` or optimistic versioning for contended rows.
+- ✅ Keep transactions short; no slow I/O inside them.
+- ✅ Always end transactions (commit/rollback); be ready to retry on serialization/deadlock.
+
+## Try it yourself
+1. Run the money-transfer transaction; force a failure between the two updates and confirm
+   `ROLLBACK` leaves balances unchanged.
+2. Open two `psql` sessions. In both, `BEGIN; SELECT ... FOR UPDATE` the same product row —
+   watch the second block until the first commits.
+3. Decrement stock with the atomic `UPDATE ... WHERE stock > 0` and verify it never goes
+   negative under concurrent runs.
+
+➡️ Next: [PostgreSQL with Node.js](./07-postgres-with-nodejs.mdx)

@@ -1,0 +1,167 @@
+---
+title: Production
+order: 8
+description: Run Postgres for real — backups, connection pooling, replication & high availability, security, monitoring, and powerful features like JSONB and full-text search.
+---
+
+# PostgreSQL in Production
+
+## What you'll learn
+- **Backups** and point-in-time recovery
+- **Connection pooling** at scale (PgBouncer)
+- **Replication** and high availability
+- **Security** hardening
+- **Monitoring** what matters
+- Powerful built-ins: **JSONB**, full-text search, extensions
+
+---
+
+## Backups — non-negotiable
+Your database is the source of truth; losing it is catastrophic. Two layers:
+
+**Logical backups** (`pg_dump`) — portable SQL/archive of a database:
+```bash
+pg_dump -U postgres -d appdb -F c -f appdb.dump     # custom-format dump
+pg_restore -U postgres -d appdb appdb.dump          # restore
+pg_dumpall -U postgres > all.sql                    # all databases + roles
+```
+
+**Physical backups + PITR** — base backups plus the **WAL** (write-ahead log) let you
+restore to *any point in time* (e.g. just before a bad migration). Tools: `pg_basebackup`,
+**pgBackRest**, **WAL-G**.
+
+> A backup you've never restored is a hope, not a backup. **Test restores regularly.** Managed
+> Postgres (RDS, Cloud SQL, Neon, Supabase) automates backups/PITR — strongly consider it
+> unless you have DBA capacity.
+
+---
+
+## Connection pooling at scale
+Each Postgres connection costs memory (it's a real process), and Postgres handles a few
+hundred well — not thousands. The app-side `pg` pool ([Lesson 07](./07-postgres-with-nodejs.mdx))
+helps per-instance, but with many app instances you add a **server-side pooler**:
+
+**PgBouncer** sits between your apps and Postgres, multiplexing many client connections onto
+a small set of real ones.
+```
+  many app instances ──▶ PgBouncer (transaction pooling) ──▶ few PG connections
+```
+Essential for serverless/high-instance-count deployments, where each instance otherwise
+opens its own connections and overwhelms the database.
+
+---
+
+## Replication & high availability
+- **Streaming replication** — a **primary** streams its WAL to one or more **replicas**
+  (read-only standbys). Use replicas to **scale reads** and as a **failover** target.
+- **Synchronous vs asynchronous** — sync waits for a replica to confirm (no data loss,
+  higher latency); async is faster but can lose the last moments on failover.
+- **Automatic failover** — tools like **Patroni**, **repmgr**, or a managed service promote
+  a replica when the primary dies.
+
+```
+            writes        ┌──────────┐  WAL stream   ┌──────────┐
+   App ──────────────────▶│ PRIMARY  │──────────────▶│ REPLICA  │ ◀── read-only queries
+                          └──────────┘               └──────────┘
+```
+> Same shape as Redis replication ([Redis scaling](../redis/09-scaling.mdx)) — primary for
+> writes, replicas for reads/standby. Most apps start single-primary + backups, add a replica
+> for HA, and let a managed service handle failover.
+
+---
+
+## Security
+- **Least-privilege roles** — don't connect as the superuser. Create an app role with only
+  the grants it needs:
+  ```sql
+  CREATE ROLE app_user LOGIN PASSWORD 'strong-secret';
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+  ```
+- **Network isolation** — bind to private networks; never expose 5432 publicly. Control
+  access via `pg_hba.conf` and firewalls/VPC.
+- **TLS** — require encrypted connections (`sslmode=require` in the connection string).
+- **Secrets** — credentials from env/secret manager, never in code (see
+  [CI/CD secrets](../ci-cd/05-secrets-and-environments.mdx)).
+- **Row-Level Security (RLS)** — enforce per-row access policies in multi-tenant apps.
+- **Parameterized queries** — your app-side defense against injection
+  ([Lesson 07](./07-postgres-with-nodejs.mdx)).
+
+---
+
+## Monitoring
+Track these (and dashboard them with the [Observability course](../observability/README.md)):
+- **Connections** — `pg_stat_activity`; watch for saturation and `idle in transaction`.
+- **Slow queries** — enable `pg_stat_statements` to find the heaviest queries:
+  ```sql
+  SELECT query, calls, mean_exec_time
+  FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10;
+  ```
+- **Cache hit ratio**, **replication lag**, **disk usage**, **table/index bloat**,
+  **autovacuum** activity.
+- The `postgres_exporter` feeds these to Prometheus/Grafana.
+
+---
+
+## Maintenance: VACUUM & autovacuum
+Postgres's MVCC leaves **dead tuples** (old row versions) after updates/deletes.
+**Autovacuum** reclaims them and refreshes planner statistics automatically — usually leave
+it on and tuned. Watch for table **bloat** on high-churn tables, and `ANALYZE` after bulk
+loads so the planner has fresh stats.
+
+---
+
+## Powerful built-ins worth knowing
+
+### JSONB — structured data, queryable
+Store semi-structured data and index/query inside it:
+```sql
+ALTER TABLE products ADD COLUMN attributes jsonb;
+UPDATE products SET attributes = '{"color":"black","tags":["usb","rgb"]}' WHERE id = 1;
+
+SELECT * FROM products WHERE attributes->>'color' = 'black';
+SELECT * FROM products WHERE attributes @> '{"tags":["rgb"]}';   -- contains
+CREATE INDEX idx_products_attrs ON products USING GIN (attributes);  -- fast jsonb queries
+```
+Best of both worlds: relational tables + flexible JSON where you need it.
+
+### Full-text search
+Search text natively — often enough to avoid a separate search engine:
+```sql
+SELECT * FROM articles
+WHERE to_tsvector('english', body) @@ to_tsquery('english', 'postgres & performance');
+CREATE INDEX idx_articles_fts ON articles USING GIN (to_tsvector('english', body));
+```
+
+### Extensions
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;   -- query stats
+CREATE EXTENSION IF NOT EXISTS pgcrypto;             -- hashing/UUIDs
+-- PostGIS (geospatial), pgvector (AI embeddings — see the Redis vector lesson's cousin)
+```
+
+---
+
+## Common pitfalls
+- ❌ No tested backups / no PITR → unrecoverable data loss.
+- ❌ Thousands of direct connections with no PgBouncer → memory exhaustion.
+- ❌ Connecting as superuser from the app.
+- ❌ Exposing Postgres to the internet / no TLS.
+- ❌ Ignoring autovacuum/bloat on high-churn tables.
+
+## Best practices
+- ✅ Automated **and tested** backups; PITR for important data.
+- ✅ PgBouncer in front of high-instance / serverless apps.
+- ✅ A replica for HA; managed Postgres unless you have DBA capacity.
+- ✅ Least-privilege roles, private network, TLS, secrets in a vault.
+- ✅ Monitor connections, slow queries, replication lag, bloat.
+
+## Try it yourself
+1. `pg_dump` the example database to a file, drop a table, and `pg_restore` it back.
+2. Enable `pg_stat_statements` and find your slowest queries after running the app.
+3. Add a `jsonb` `attributes` column to `products`, store some attributes, add a GIN index,
+   and query with `@>`.
+
+🎉 **You've completed the PostgreSQL course.** You can now design schemas, write correct and
+fast SQL, handle concurrency, and run Postgres in production — the durable foundation under
+the [Redis](../redis/README.md), [Docker](../docker/README.md), [Nginx](../nginx/README.md),
+[CI/CD](../ci-cd/README.md), and [Observability](../observability/README.md) courses.

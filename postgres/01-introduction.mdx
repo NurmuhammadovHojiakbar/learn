@@ -1,0 +1,146 @@
+---
+title: Introduction & Setup
+order: 1
+description: What a relational database is, why PostgreSQL, how to install and run it, and the basics of the psql shell.
+---
+
+# Introduction to PostgreSQL
+
+## What you'll learn
+- What a relational database is and the core vocabulary
+- Why PostgreSQL specifically
+- Installing and running Postgres
+- Getting around in `psql`
+
+---
+
+## What is a relational database?
+A **relational database** stores data in **tables** (rows and columns), where rows in one
+table can **relate** to rows in another via keys. You query and manipulate it with **SQL**
+(Structured Query Language).
+
+```
+   users                          orders
+ ┌────┬─────────┐               ┌────┬─────────┬────────┐
+ │ id │ name    │               │ id │ user_id │ total  │
+ ├────┼─────────┤               ├────┼─────────┼────────┤
+ │ 1  │ Ada     │◀──────────────│ 10 │   1     │ 49.99  │
+ │ 2  │ Linus   │   relationship│ 11 │   1     │ 12.00  │
+ └────┴─────────┘   (foreign key)└────┴─────────┴────────┘
+```
+`orders.user_id` points at `users.id` — that's the relationship. This structure, plus
+**ACID transactions**, is what makes relational databases the trustworthy home for
+important data (users, orders, payments).
+
+### Core vocabulary
+- **Table** — a collection of rows (like a spreadsheet/entity).
+- **Row / record** — one entry.
+- **Column / field** — one attribute, with a **type**.
+- **Primary key** — a column uniquely identifying each row (usually `id`).
+- **Foreign key** — a column referencing another table's primary key.
+- **Schema** — the structure (tables, columns, types, constraints).
+- **Query** — a SQL statement to read or change data.
+
+---
+
+## Why PostgreSQL?
+There are many SQL databases (MySQL, SQLite, SQL Server). Postgres stands out for:
+- **Standards-compliant, full-featured SQL** — joins, CTEs, window functions, full-text.
+- **Strong ACID guarantees** and robust concurrency (MVCC).
+- **Extensible** — `JSONB`, arrays, custom types, and extensions like **PostGIS** (geo) and
+  **pgvector** (AI embeddings).
+- **Open source & reliable** — no license cost, decades of production hardening.
+
+It's the default choice for new backends for good reason.
+
+---
+
+## SQL vs NoSQL (and where Redis fits)
+- **SQL / relational (Postgres)** — structured data with relationships and strong
+  consistency. Great default for application data.
+- **NoSQL** — document stores (MongoDB), key-value (Redis), etc. — trade some guarantees for
+  flexibility/speed in specific shapes.
+
+In this library, **Postgres is the durable source of truth** and **Redis is the fast cache**
+in front of it (see the [Redis course](../redis/05-caching-patterns.mdx)). Different jobs,
+used together.
+
+---
+
+## Installing & running
+
+### Docker (recommended for this course)
+```bash
+docker run --name pg \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=appdb \
+  -p 5432:5432 -d postgres:16
+
+# open a SQL shell inside the container
+docker exec -it pg psql -U postgres -d appdb
+```
+
+### Native
+```bash
+# Debian/Ubuntu
+sudo apt-get install postgresql
+sudo -u postgres psql
+
+# macOS
+brew install postgresql@16 && brew services start postgresql@16
+psql postgres
+```
+
+### A GUI (optional)
+**pgAdmin**, **DBeaver**, or **TablePlus** give you a visual client. Great for browsing, but
+learn `psql` too — it's everywhere and scriptable.
+
+---
+
+## Getting around in psql
+`psql` is the official terminal client. Its **meta-commands** start with `\`:
+```sql
+\l              -- list databases
+\c appdb        -- connect to a database
+\dt             -- list tables
+\d users        -- describe the "users" table (columns, types, indexes)
+\du             -- list roles/users
+\x              -- toggle expanded display (nice for wide rows)
+\timing         -- show how long queries take
+\?              -- help on meta-commands
+\q              -- quit
+```
+
+Run SQL by ending statements with a semicolon:
+```sql
+SELECT version();
+CREATE TABLE greetings (id serial PRIMARY KEY, message text);
+INSERT INTO greetings (message) VALUES ('hello postgres');
+SELECT * FROM greetings;
+```
+
+> Connection string form (used by apps and tools):
+> `postgresql://user:password@host:5432/database`
+
+---
+
+## Common pitfalls
+- ❌ Forgetting the semicolon — `psql` waits for it; your statement won't run.
+- ❌ Confusing a **database** (a whole DB) with a **schema** (a namespace inside it) with a
+  **table**.
+- ❌ Treating Postgres like a cache — it's the durable store; put hot ephemeral data in Redis.
+- ❌ Exposing port 5432 to the internet — keep the DB on a private network.
+
+## Best practices
+- ✅ Use a recent major version (16+) and pin it (`postgres:16`).
+- ✅ Learn `psql` basics even if you use a GUI.
+- ✅ Use a dedicated database per app; never develop against production.
+- ✅ Store credentials in env vars / secrets, not in code.
+
+## Try it yourself
+1. Start Postgres in Docker and connect with `psql`.
+2. Run `\l` and `\du`, then create the `greetings` table above, insert two rows, and
+   `SELECT * FROM greetings;`.
+3. `\d greetings` — note the `id` column and its primary-key index.
+
+➡️ Next: [SQL Fundamentals](./02-sql-fundamentals.mdx)

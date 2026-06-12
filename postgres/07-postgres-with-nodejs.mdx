@@ -1,0 +1,213 @@
+---
+title: PostgreSQL with Node.js
+order: 7
+description: Connect Node to Postgres with the pg driver — connection pooling, parameterized queries (SQL injection safety), transactions, migrations, and caching with Redis.
+---
+
+# PostgreSQL with Node.js
+
+## What you'll learn
+- Using the **`pg`** driver with a connection **pool**
+- **Parameterized queries** (and why they stop SQL injection)
+- Running **transactions** from Node
+- **Migrations** for schema changes
+- Tying it together: **cache-aside with Redis**
+
+---
+
+## Install & connect with a pool
+```bash
+npm install pg
+```
+Always use a **connection Pool**, not a single client — opening a connection per request is
+slow, and pools reuse a managed set.
+```js
+// db.js
+import pg from 'pg';
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:secret@localhost:5432/appdb',
+  max: 10,                       // max connections in the pool
+  idleTimeoutMillis: 30000,
+});
+
+pool.on('error', (err) => console.error('Unexpected PG pool error', err));
+
+export const query = (text, params) => pool.query(text, params);
+export default pool;
+```
+```js
+import { query } from './db.js';
+const { rows } = await query('SELECT * FROM users WHERE id = $1', [1]);
+console.log(rows[0]);
+```
+`pool.query` checks out a connection, runs the query, and returns it automatically.
+
+---
+
+## Parameterized queries — NEVER concatenate input
+This is the single most important security rule with SQL. **Never** build queries by string
+concatenation:
+```js
+// ❌ SQL INJECTION VULNERABILITY — never do this
+const { rows } = await query(`SELECT * FROM users WHERE email = '${email}'`);
+// if email = "x' OR '1'='1", an attacker dumps every user
+```
+Use **placeholders** (`$1, $2, …`) and pass values separately — the driver sends them apart
+from the SQL, so they can never be interpreted as code:
+```js
+// ✅ safe and correct
+const { rows } = await query(
+  'SELECT * FROM users WHERE email = $1',
+  [email]
+);
+
+await query(
+  'INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id',
+  [name, email]
+);
+```
+> Parameterization isn't just security — it also lets Postgres reuse query plans. There is
+> **no** good reason to interpolate user input into SQL. Ever.
+
+---
+
+## Reading results
+```js
+const result = await query('SELECT id, name FROM users WHERE is_active = $1', [true]);
+result.rows;        // array of row objects: [{ id: 1, name: 'Ada' }, ...]
+result.rowCount;    // number of rows
+```
+
+---
+
+## Transactions from Node
+For a transaction you must use the **same connection** for every statement, so check one out
+of the pool explicitly with `pool.connect()`:
+```js
+import pool from './db.js';
+
+async function placeOrder(userId, items) {
+  const client = await pool.connect();          // a dedicated connection
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      'INSERT INTO orders (user_id, total) VALUES ($1, $2) RETURNING id',
+      [userId, 0]
+    );
+    const orderId = rows[0].id;
+
+    let total = 0;
+    for (const item of items) {
+      // atomic stock check + decrement (Lesson 06)
+      const upd = await client.query(
+        'UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING price',
+        [item.qty, item.productId]
+      );
+      if (upd.rowCount === 0) throw new Error(`product ${item.productId} out of stock`);
+
+      const price = upd.rows[0].price;
+      total += price * item.qty;
+      await client.query(
+        'INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)',
+        [orderId, item.productId, item.qty, price]
+      );
+    }
+
+    await client.query('UPDATE orders SET total = $1 WHERE id = $2', [total, orderId]);
+    await client.query('COMMIT');
+    return orderId;
+  } catch (err) {
+    await client.query('ROLLBACK');             // undo everything on any failure
+    throw err;
+  } finally {
+    client.release();                           // ALWAYS return the connection to the pool
+  }
+}
+```
+The `try/catch/finally` shape — `BEGIN` → work → `COMMIT`, `ROLLBACK` on error, `release()`
+always — is the canonical Node transaction pattern. **Forgetting `release()` leaks
+connections** until the pool is exhausted.
+
+---
+
+## Migrations — version your schema
+Don't hand-edit production schemas. **Migrations** are ordered, version-controlled scripts
+that evolve the schema reproducibly (and run in CI/CD). Popular tools: `node-pg-migrate`,
+Knex, Prisma Migrate, Drizzle.
+```
+migrations/
+  001_create_users.sql
+  002_create_orders.sql
+  003_add_index_orders_user_id.sql
+```
+```sql
+-- 003_add_index_orders_user_id.sql
+CREATE INDEX idx_orders_user_id ON orders (user_id);
+```
+Each migration runs once, in order, tracked in a migrations table. This is how schema changes
+flow safely from dev → CI → production (tie-in with the [CI/CD course](../ci-cd/README.md)).
+
+> ORMs/query builders (Prisma, Drizzle, Knex, TypeORM) sit on top of `pg` and give you typed
+> models + migrations. Great for productivity — but understand the SQL underneath, which is
+> what these lessons teach.
+
+---
+
+## Cache-aside with Redis (bringing it together)
+Postgres is the source of truth; **Redis caches** hot reads so you don't hit the DB every
+time (the [Redis cache-aside pattern](../redis/05-caching-patterns.mdx)):
+```js
+import { query } from './db.js';
+import redis from './redisClient.js';
+
+async function getUser(id) {
+  const key = `user:${id}`;
+
+  const cached = await redis.get(key);          // 1. try cache
+  if (cached) return JSON.parse(cached);
+
+  const { rows } = await query('SELECT id, name, email FROM users WHERE id = $1', [id]);
+  const user = rows[0] || null;                 // 2. miss → Postgres
+
+  if (user) await redis.set(key, JSON.stringify(user), { EX: 300 });  // 3. populate cache
+  return user;
+}
+
+// invalidate the cache when the row changes
+async function updateUserName(id, name) {
+  const { rows } = await query(
+    'UPDATE users SET name = $1 WHERE id = $2 RETURNING id, name, email',
+    [name, id]
+  );
+  await redis.del(`user:${id}`);                // drop stale cache
+  return rows[0];
+}
+```
+This is the whole library working together: **Postgres stores, Redis accelerates.**
+
+---
+
+## Common pitfalls
+- ❌ String-concatenating user input into SQL → injection. Use `$1` placeholders.
+- ❌ A new client/connection per request instead of a pool → exhaustion and latency.
+- ❌ Forgetting `client.release()` (or `COMMIT`/`ROLLBACK`) → leaked/stuck connections.
+- ❌ Caching in Redis but never invalidating on write → stale data.
+- ❌ Hand-editing schemas instead of migrations → drift between environments.
+
+## Best practices
+- ✅ One shared `Pool`; parameterize every query.
+- ✅ Transactions on a single checked-out client with `try/catch/finally` + `release()`.
+- ✅ Version schema changes with migrations, run them in CI/CD.
+- ✅ Cache hot reads in Redis with a TTL; invalidate on write.
+
+## Try it yourself
+1. Wire the `pool` + a parameterized `getUser`, and confirm a malicious email string can't
+   break out (it's treated as a literal).
+2. Implement `placeOrder` as a transaction and verify a mid-order failure rolls back the
+   whole order.
+3. Add Redis cache-aside to `getUser`; confirm the second call skips Postgres (log a line in
+   the DB branch).
+
+➡️ Next: [Production](./08-production.mdx)

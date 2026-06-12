@@ -5,20 +5,31 @@ course is a set of numbered `.mdx` lessons plus **runnable examples**, written i
 consistent style: concepts → real code → pitfalls → best practices → a "Try it yourself"
 exercise.
 
-The courses are designed to **interlock** — you build a Node.js app, give it a Redis cache,
-containerize it with Docker, and ship it automatically with CI/CD.
+The courses are designed to **interlock** — you build a Node.js app on a Postgres database,
+give it a Redis cache, containerize it with Docker, front it with Nginx, ship it with
+CI/CD, and operate it with an observability stack.
 
 ```
-   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌──────────────┐
-   │  Redis  │─▶ │ Docker  │─▶ │  Nginx  │─▶ │  CI/CD  │─▶ │ Observability│
-   │  cache  │   │ package │   │  front  │   │  ship   │   │   operate    │
-   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └──────────────┘
-   build the app  containerize  front door    test&deploy   metrics·logs·traces
+   DATA LAYER                 PACKAGE & SHIP                       OPERATE
+ ┌──────────┐ ┌───────┐   ┌────────┐ ┌───────┐ ┌────────┐   ┌──────────────┐
+ │ Postgres │ │ Redis │─▶ │ Docker │ │ Nginx │ │ CI/CD  │─▶ │ Observability│
+ │ store    │ │ cache │   │package │ │ front │ │  ship  │   │   operate    │
+ └──────────┘ └───────┘   └────────┘ └───────┘ └────────┘   └──────────────┘
+  source of    fast cache  containerize front  test&deploy   metrics·logs·traces
+  truth
 ```
 
 ---
 
 ## Courses
+
+### 🐘 [PostgreSQL](./postgres/README.md) — the relational database
+Store your data with integrity: SQL fundamentals, schema design & relationships, joins &
+aggregation, indexing & performance, transactions & concurrency, and production use with
+Node.js (`pg`) plus Redis caching.
+**8 lessons + a runnable Node + Postgres + Redis app.**
+
+> Start here for the source-of-truth data layer everything else builds on.
 
 ### 🔴 [Redis](./redis/README.md) — in-memory data & caching
 Use Redis to make apps fast: data types, caching patterns, pub/sub & streams, transactions,
@@ -61,16 +72,19 @@ dashboards (Grafana), alerting & SLOs, and distributed tracing (OpenTelemetry + 
 ## Suggested learning paths
 
 **Full stack-to-ship path (recommended):**
-1. **Redis** 01–05 — core data types & caching (build the app's data layer).
-2. **Docker** 01–06 — containerize the app + dependencies.
-3. **Nginx** 01–04 — front the app with a reverse proxy.
-4. **CI/CD** 01–06 — automate lint/test/build and publish the image.
-5. **CI/CD** 07–08 + **Docker** 07–08 + **Nginx** 05–08 — deploy, load-balance, add TLS,
+1. **PostgreSQL** 01–04 — model and query the app's data (the source of truth).
+2. **Redis** 01–05 — add caching in front of Postgres.
+3. **Docker** 01–06 — containerize the app + dependencies.
+4. **Nginx** 01–04 — front the app with a reverse proxy.
+5. **CI/CD** 01–06 — automate lint/test/build and publish the image.
+6. **CI/CD** 07–08 + **Docker** 07–08 + **Nginx** 05–08 — deploy, load-balance, add TLS,
    harden, and operate it.
-6. **Observability** 01–08 — instrument the running app with metrics, logs, traces, and
+7. **Observability** 01–08 — instrument the running app with metrics, logs, traces, and
    alerts so you can operate it.
-7. Circle back to **Redis** 06–11 for pub/sub, scaling, and vector search as you need them.
+8. Go deeper as needed: **PostgreSQL** 05–08 (indexing, transactions, production) and
+   **Redis** 06–11 (pub/sub, scaling, vector search).
 
+**Just need a database?** PostgreSQL 01–04 + 07.
 **Just need caching?** Redis 01–05 + 10 (production patterns).
 **Just need to containerize?** Docker 01–06.
 **Just need a reverse proxy / HTTPS?** Nginx 01–04 + 06.
@@ -97,6 +111,7 @@ dashboards (Grafana), alerting & SLOs, and distributed tracing (OpenTelemetry + 
 ## At a glance
 | Course | Lessons | Example stack | You'll be able to… |
 |--------|:-------:|---------------|--------------------|
+| [PostgreSQL](./postgres/README.md) | 8 | Node + `pg` + Redis | Design schemas, write fast SQL, run it in prod |
 | [Redis](./redis/README.md) | 11 | Node + `node-redis` | Cache, rank, queue, pub/sub, vector-search |
 | [Docker](./docker/README.md) | 8 | Node + Redis | Containerize and run multi-service apps |
 | [Nginx](./nginx/README.md) | 8 | Nginx + Node + Redis | Reverse-proxy, load-balance, and TLS your app |

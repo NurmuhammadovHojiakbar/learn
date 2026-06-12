@@ -1,0 +1,171 @@
+---
+title: Joins & Aggregation
+order: 4
+description: Combine tables with joins, summarize data with GROUP BY and aggregates, and write subqueries, CTEs, and window functions.
+---
+
+# Joins & Aggregation
+
+## What you'll learn
+- Combining tables with **JOINs** (inner, left, right, full)
+- Summarizing with **aggregate functions** and `GROUP BY`
+- `HAVING` vs `WHERE`
+- **Subqueries**, **CTEs**, and a taste of **window functions**
+
+This is where SQL gets powerful — answering real questions across related tables.
+
+---
+
+## JOINs — combine rows from multiple tables
+Using the schema from [Lesson 03](./03-schema-design.mdx) (`users`, `orders`, …):
+
+### INNER JOIN — only matching rows
+```sql
+SELECT u.name, o.id AS order_id, o.total
+FROM users u
+INNER JOIN orders o ON o.user_id = u.id;
+```
+Returns only users **who have** orders (and only orders with a valid user). Unmatched rows
+are excluded.
+
+### LEFT JOIN — keep all rows from the left table
+```sql
+SELECT u.name, o.id AS order_id, o.total
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id;
+```
+Returns **every** user; users with no orders show `NULL` for the order columns. This is how
+you find "users without orders":
+```sql
+SELECT u.name
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE o.id IS NULL;        -- no matching order
+```
+
+### The join types
+```
+ INNER JOIN  → rows present in BOTH tables
+ LEFT  JOIN  → ALL left rows + matches (NULLs where no match)
+ RIGHT JOIN  → ALL right rows + matches
+ FULL  JOIN  → all rows from both sides
+```
+INNER and LEFT cover the vast majority of real queries.
+
+### Joining several tables
+```sql
+SELECT u.name, p.name AS product, oi.quantity, oi.unit_price
+FROM orders o
+JOIN users u        ON u.id = o.user_id
+JOIN order_items oi ON oi.order_id = o.id
+JOIN products p     ON p.id = oi.product_id
+WHERE o.id = 10;
+```
+Use short table **aliases** (`u`, `o`, `oi`, `p`) to keep multi-join queries readable.
+
+---
+
+## Aggregate functions
+Compute a single value across many rows:
+```sql
+SELECT count(*)        FROM orders;              -- number of orders
+SELECT sum(total)      FROM orders;              -- total revenue
+SELECT avg(total)      FROM orders;              -- average order value
+SELECT min(total), max(total) FROM orders;       -- smallest / largest
+```
+
+### GROUP BY — aggregate per group
+```sql
+-- revenue and order count per user
+SELECT u.name,
+       count(o.id)   AS order_count,
+       sum(o.total)  AS total_spent
+FROM users u
+JOIN orders o ON o.user_id = u.id
+GROUP BY u.id, u.name
+ORDER BY total_spent DESC;
+```
+Every non-aggregated column in `SELECT` must appear in `GROUP BY`.
+
+### HAVING — filter groups (vs WHERE filters rows)
+```sql
+SELECT u.name, sum(o.total) AS total_spent
+FROM users u
+JOIN orders o ON o.user_id = u.id
+GROUP BY u.id, u.name
+HAVING sum(o.total) > 100;        -- only users who spent over 100
+```
+> **`WHERE` filters rows *before* grouping; `HAVING` filters groups *after*.** You can't use
+> an aggregate in `WHERE` — that's what `HAVING` is for.
+
+---
+
+## Subqueries
+A query nested inside another:
+```sql
+-- users who spent more than the average order total
+SELECT name FROM users
+WHERE id IN (
+    SELECT user_id FROM orders WHERE total > (SELECT avg(total) FROM orders)
+);
+```
+
+---
+
+## CTEs (Common Table Expressions) — readable queries with WITH
+A CTE names a subquery up front, so complex queries read top-to-bottom instead of inside-out:
+```sql
+WITH user_spend AS (
+    SELECT user_id, sum(total) AS total_spent
+    FROM orders
+    GROUP BY user_id
+)
+SELECT u.name, us.total_spent
+FROM user_spend us
+JOIN users u ON u.id = us.user_id
+WHERE us.total_spent > 100
+ORDER BY us.total_spent DESC;
+```
+Prefer CTEs over deeply nested subqueries for anything non-trivial — they're far easier to
+read and debug.
+
+---
+
+## Window functions (a taste)
+Aggregate **without collapsing rows** — each row keeps its detail *and* sees a computation
+over a "window" of related rows. Great for rankings and running totals.
+```sql
+-- rank each user's orders by total, newest-style numbering per user
+SELECT
+    user_id,
+    id AS order_id,
+    total,
+    rank() OVER (PARTITION BY user_id ORDER BY total DESC) AS spend_rank,
+    sum(total) OVER (PARTITION BY user_id) AS user_total
+FROM orders;
+```
+`OVER (PARTITION BY ...)` defines the window. Unlike `GROUP BY`, you still get one row per
+order. Window functions (`row_number`, `rank`, `lag`, running `sum`) are a SQL superpower
+worth learning after the basics.
+
+---
+
+## Common pitfalls
+- ❌ Using `INNER JOIN` when you meant `LEFT JOIN` → silently dropping rows with no match.
+- ❌ Putting an aggregate in `WHERE` → use `HAVING`.
+- ❌ Forgetting non-aggregated columns in `GROUP BY` → error.
+- ❌ Deeply nested subqueries that no one can read → use CTEs.
+- ❌ A missing/incorrect join condition → an accidental **cross join** (every row × every row).
+
+## Best practices
+- ✅ Default to `INNER`/`LEFT` joins; alias tables for readability.
+- ✅ `WHERE` before grouping, `HAVING` after.
+- ✅ Use CTEs (`WITH`) to structure complex queries.
+- ✅ Reach for window functions for rankings/running totals instead of self-joins.
+
+## Try it yourself
+1. List each user with their order count and total spent (`GROUP BY`), highest spender first.
+2. Find users with **no** orders (`LEFT JOIN ... IS NULL`).
+3. Rewrite query 1 as a CTE, then add a window function ranking users by total spent.
+
+➡️ Next: [Indexing & Performance](./05-indexing-and-performance.mdx)

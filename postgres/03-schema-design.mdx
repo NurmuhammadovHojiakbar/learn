@@ -1,0 +1,174 @@
+---
+title: Schema Design & Relationships
+order: 3
+description: Model data well — primary and foreign keys, constraints, normalization, and one-to-many / many-to-many relationships.
+---
+
+# Schema Design & Relationships
+
+## What you'll learn
+- Primary keys and foreign keys
+- Constraints that protect data integrity
+- **Normalization** (and when to denormalize)
+- Modeling **one-to-many** and **many-to-many** relationships
+
+Good schema design is most of what makes a database pleasant or painful to work with for
+years. Spend the time here.
+
+---
+
+## Primary keys
+Every table should have a **primary key** — a column (or set) that uniquely identifies each
+row.
+```sql
+CREATE TABLE users (
+    id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- standards-based auto-id
+    -- or:  id serial PRIMARY KEY
+    email text UNIQUE NOT NULL
+);
+```
+**Integer vs UUID keys:**
+- `bigint`/`serial` — compact, fast, human-readable, ordered. Default choice.
+- `uuid` — globally unique without coordination (good for distributed systems, hiding
+  counts, client-generated ids), but larger and random.
+```sql
+id uuid PRIMARY KEY DEFAULT gen_random_uuid()
+```
+
+---
+
+## Foreign keys — relationships
+A **foreign key** enforces that a value references an existing row in another table:
+```sql
+CREATE TABLE orders (
+    id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id  bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    total    numeric(10,2) NOT NULL,
+    created_at timestamptz DEFAULT now()
+);
+```
+Now you **cannot** insert an order with a `user_id` that doesn't exist — the database
+guarantees **referential integrity**.
+
+### ON DELETE behavior
+What happens to orders when their user is deleted?
+| Clause | Effect |
+|--------|--------|
+| `ON DELETE CASCADE` | delete the user's orders too |
+| `ON DELETE RESTRICT` | block deleting a user who has orders (default-ish) |
+| `ON DELETE SET NULL` | keep orders, set their `user_id` to NULL |
+
+Choose based on your domain. `CASCADE` is convenient but deletes data — use deliberately.
+
+---
+
+## Constraints — let the database enforce the rules
+Constraints keep bad data out, no matter what the app does:
+```sql
+CREATE TABLE products (
+    id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sku    text UNIQUE NOT NULL,                       -- no duplicate SKUs
+    name   text NOT NULL,                              -- required
+    price  numeric(10,2) NOT NULL CHECK (price >= 0),  -- no negative prices
+    stock  integer NOT NULL DEFAULT 0 CHECK (stock >= 0),
+    status text NOT NULL DEFAULT 'active'
+           CHECK (status IN ('active', 'discontinued'))
+);
+```
+| Constraint | Guarantees |
+|-----------|------------|
+| `PRIMARY KEY` | unique + not null identity |
+| `UNIQUE` | no duplicate values |
+| `NOT NULL` | value required |
+| `CHECK` | value satisfies a condition |
+| `REFERENCES` (FK) | value exists in another table |
+
+> Enforce invariants in the **database**, not just the app. App code has bugs and there may
+> be multiple writers; the database is the last line of defense for data integrity.
+
+---
+
+## Normalization
+**Normalization** means structuring data to avoid duplication and update anomalies — each
+fact lives in exactly one place.
+
+❌ **Unnormalized** (repeats user info on every order, can disagree):
+```
+orders(id, user_name, user_email, product_name, product_price, qty)
+```
+✅ **Normalized** (each entity once; relate by keys):
+```
+users(id, name, email)
+products(id, name, price)
+orders(id, user_id → users, created_at)
+order_items(id, order_id → orders, product_id → products, qty, unit_price)
+```
+Benefits: update a user's email in one row; no contradictory copies; smaller, cleaner data.
+
+> **When to denormalize:** sometimes you duplicate data deliberately for read performance
+> (e.g. store `order_items.unit_price` as the price *at purchase time*, since the product's
+> current price will change). Normalize by default; denormalize with a reason.
+
+---
+
+## One-to-many
+The most common relationship: one user has many orders. The "many" side holds the foreign
+key.
+```sql
+-- one user  ──▶  many orders
+orders.user_id REFERENCES users(id)
+```
+```sql
+SELECT * FROM orders WHERE user_id = 1;     -- all of user 1's orders
+```
+
+---
+
+## Many-to-many
+An order has many products, and a product appears in many orders. Model it with a **join
+table** (a.k.a. junction table):
+```sql
+CREATE TABLE order_items (
+    order_id   bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id bigint NOT NULL REFERENCES products(id),
+    quantity   integer NOT NULL CHECK (quantity > 0),
+    unit_price numeric(10,2) NOT NULL,        -- price captured at purchase time
+    PRIMARY KEY (order_id, product_id)        -- composite key: each product once per order
+);
+```
+```
+ orders ──< order_items >── products      (the "<...>" is the join table)
+```
+The composite primary key `(order_id, product_id)` prevents the same product being added to
+one order twice.
+
+---
+
+## Putting it together (the example schema)
+The [examples/db/schema.sql](./examples) builds exactly this model — `users`, `products`,
+`orders`, `order_items` — with keys and constraints. It's the schema the Node app in
+[Lesson 07](./07-postgres-with-nodejs.mdx) queries.
+
+---
+
+## Common pitfalls
+- ❌ No primary key → rows you can't reliably address or update.
+- ❌ Storing relationships as comma-separated strings instead of a join table.
+- ❌ No foreign keys → orphaned rows and silent corruption.
+- ❌ Duplicating data everywhere (unnormalized) → contradictory copies.
+- ❌ Relying only on app validation for integrity — add DB constraints too.
+
+## Best practices
+- ✅ Every table gets a primary key; relate tables with foreign keys.
+- ✅ Encode invariants as `NOT NULL` / `UNIQUE` / `CHECK` constraints.
+- ✅ Normalize by default; denormalize deliberately for performance.
+- ✅ Use a join table for many-to-many; capture point-in-time values (like price) when they
+  matter.
+
+## Try it yourself
+1. Build `users`, `products`, `orders`, and `order_items` with the keys and constraints
+   above.
+2. Try to insert an order with a non-existent `user_id` — watch the FK reject it.
+3. Add a `CHECK (price >= 0)` and confirm a negative price is refused.
+
+➡️ Next: [Joins & Aggregation](./04-joins-and-aggregation.mdx)
