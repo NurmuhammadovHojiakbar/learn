@@ -1,0 +1,153 @@
+---
+title: Load Balancing
+order: 5
+description: Spread traffic across multiple backend instances with upstream blocks — balancing algorithms, health checks, sticky sessions, and weights.
+---
+
+# Load Balancing
+
+## What you'll learn
+- Defining a pool of backends with `upstream`
+- The **balancing algorithms** and when to use each
+- **Passive health checks** and failover
+- Sticky sessions and weighted servers
+
+One app instance can only do so much. Run several and let Nginx distribute requests across
+them — for throughput **and** resilience.
+
+---
+
+## A basic upstream pool
+```nginx
+upstream node_backend {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    server 127.0.0.1:3003;
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://node_backend;     # Nginx spreads requests across the pool
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+By default Nginx uses **round-robin** — each request goes to the next server in turn.
+
+In Docker/Compose, the servers are service names, e.g.:
+```nginx
+upstream node_backend {
+    server api1:3000;
+    server api2:3000;
+    server api3:3000;
+}
+```
+
+---
+
+## Balancing algorithms
+```nginx
+upstream node_backend {
+    # round-robin (default) — even rotation
+
+    # least_conn;          # send to the server with the fewest active connections
+                           # good when request durations vary
+
+    # ip_hash;             # same client IP always hits the same server (sticky)
+                           # use for in-memory sessions tied to one instance
+
+    # hash $request_uri consistent;   # route by a key (e.g. cache-friendly sharding)
+
+    server api1:3000;
+    server api2:3000;
+}
+```
+
+| Algorithm | Use when |
+|-----------|----------|
+| round-robin (default) | Stateless backends, uniform requests |
+| `least_conn` | Request durations vary (some slow, some fast) |
+| `ip_hash` | You need stickiness and can't share session state |
+| `hash ... consistent` | Cache locality / sharding by a key |
+
+> **Better than sticky sessions:** make your app **stateless** by storing sessions in Redis
+> (see the [Redis course](../redis/10-nodejs-production.mdx)). Then any instance can serve
+> any request and you can use `least_conn` freely — no `ip_hash` needed.
+
+---
+
+## Health checks & failover (open source)
+Open-source Nginx does **passive** health checks: if a server fails to respond, Nginx marks
+it down for a while and routes around it.
+```nginx
+upstream node_backend {
+    server api1:3000 max_fails=3 fail_timeout=30s;
+    server api2:3000 max_fails=3 fail_timeout=30s;
+    server api3:3000 backup;        # only used if the others are down
+}
+```
+- `max_fails` — failures within `fail_timeout` before marking the server down.
+- `fail_timeout` — how long it stays down before being retried.
+- `backup` — a standby used only when primaries are unavailable.
+
+> **Active** health checks (Nginx probing a `/health` endpoint proactively) are a feature of
+> **Nginx Plus** (commercial). With open-source Nginx, rely on passive checks, or use an
+> orchestrator (Kubernetes/Compose healthchecks) to remove unhealthy instances.
+
+---
+
+## Weighted distribution
+Send more traffic to bigger servers:
+```nginx
+upstream node_backend {
+    server api1:3000 weight=3;     # gets ~3x the traffic
+    server api2:3000 weight=1;
+}
+```
+
+---
+
+## Keepalive to backends
+Reuse upstream connections instead of opening a new one per request — a real performance
+win:
+```nginx
+upstream node_backend {
+    server api1:3000;
+    server api2:3000;
+    keepalive 32;                  # keep up to 32 idle connections open
+}
+
+server {
+    location / {
+        proxy_pass http://node_backend;
+        proxy_http_version 1.1;        # required for keepalive
+        proxy_set_header Connection "";  # clear the Connection header
+    }
+}
+```
+
+---
+
+## Common pitfalls
+- ❌ In-memory sessions across multiple instances without `ip_hash` → users randomly logged
+  out. (Better: store sessions in Redis and stay stateless.)
+- ❌ Expecting active health checks in open-source Nginx — only passive are available.
+- ❌ Keepalive to upstreams without `proxy_http_version 1.1` + clearing `Connection`.
+- ❌ One overloaded instance because requests vary wildly — switch to `least_conn`.
+
+## Best practices
+- ✅ Make the app **stateless** (sessions in Redis); then load-balance freely.
+- ✅ Use `least_conn` when request times vary; round-robin when uniform.
+- ✅ Set `max_fails`/`fail_timeout` for passive failover; add a `backup` if you have one.
+- ✅ Enable upstream `keepalive` for throughput.
+
+## Try it yourself
+1. Run three copies of the Node app on :3001–:3003 (or three Compose replicas), put them in
+   an `upstream`, and `curl` repeatedly — log the instance id to watch requests rotate.
+2. Kill one instance and confirm Nginx routes around it (no errors after `max_fails`).
+3. Switch to `least_conn`, add an artificial slow endpoint to one instance, and observe the
+   distribution change.
+
+➡️ Next: [HTTPS & TLS](./06-https-and-tls.mdx)

@@ -1,0 +1,161 @@
+---
+title: Performance & Security
+order: 7
+description: Tune Nginx for speed and lock it down — compression, caching, rate limiting, security headers, and hardening.
+---
+
+# Performance & Security
+
+## What you'll learn
+- Compression and **proxy caching**
+- **Rate limiting** and connection limits
+- Essential **security headers**
+- Hardening: hiding version info, limiting body size, blocking bad paths
+
+Nginx is the perfect place to enforce these centrally — before traffic ever reaches your
+app.
+
+---
+
+## Compression
+Already covered for static files in [Lesson 03](./03-serving-static-sites.mdx); apply it
+globally in `http`:
+```nginx
+gzip on;
+gzip_vary on;
+gzip_min_length 1024;
+gzip_types text/plain text/css application/json application/javascript text/xml
+           application/xml image/svg+xml;
+```
+Brotli (`ngx_brotli` module) compresses ~15–20% better for text; gzip is built in and a
+big win on its own.
+
+---
+
+## Proxy caching
+Cache backend responses in Nginx so repeat requests skip the app entirely:
+```nginx
+# Define a cache zone (in the http context)
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=api_cache:10m
+                 max_size=1g inactive=60m;
+
+server {
+    location /api/ {
+        proxy_pass http://node_backend;
+        proxy_cache api_cache;
+        proxy_cache_valid 200 10m;          # cache 200s for 10 min
+        proxy_cache_valid 404 1m;
+        proxy_cache_use_stale error timeout updating;   # serve stale if backend is down
+        add_header X-Cache-Status $upstream_cache_status;  # HIT / MISS / EXPIRED
+    }
+}
+```
+`X-Cache-Status` lets you verify hits with `curl -I`. Cache only cacheable responses —
+respect `Cache-Control` from the app, and don't cache personalized/authenticated content.
+
+---
+
+## Rate limiting
+Protect against abuse and traffic spikes. Define a zone, then apply it:
+```nginx
+# http context: 10 requests/second per client IP, tracked in a 10MB zone
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+server {
+    location /api/ {
+        limit_req zone=api_limit burst=20 nodelay;   # allow short bursts of 20
+        limit_req_status 429;                         # return 429 when exceeded
+        proxy_pass http://node_backend;
+    }
+}
+```
+- `rate=10r/s` — sustained allowed rate.
+- `burst=20` — queue up to 20 extra before rejecting.
+- `nodelay` — serve the burst immediately rather than spacing it out.
+
+**Limit concurrent connections** too:
+```nginx
+limit_conn_zone $binary_remote_addr zone=conn_limit:10m;
+server {
+    limit_conn conn_limit 20;     # max 20 simultaneous connections per IP
+}
+```
+
+> This complements app-level rate limiting (e.g. the Redis limiter from the
+> [Redis course](../redis/10-nodejs-production.mdx)) — Nginx stops floods at the edge; the
+> app enforces per-user business rules.
+
+---
+
+## Security headers
+Add defensive headers to every response:
+```nginx
+add_header X-Content-Type-Options "nosniff" always;        # no MIME sniffing
+add_header X-Frame-Options "SAMEORIGIN" always;            # clickjacking protection
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Content-Security-Policy "default-src 'self'" always;  # tailor to your app!
+# (HSTS lives on the HTTPS server — see Lesson 06)
+```
+> `Content-Security-Policy` is powerful but must be tailored to your app's real sources, or
+> it breaks things. Start in report-only mode (`Content-Security-Policy-Report-Only`) and
+> tighten gradually.
+
+---
+
+## Hardening
+```nginx
+server_tokens off;             # hide the Nginx version in responses/error pages
+client_max_body_size 10m;      # cap upload size (default 1m) — prevent huge-body abuse
+client_body_timeout 10s;
+send_timeout 10s;
+
+# Block hidden/dotfiles (e.g. .git, .env)
+location ~ /\.(?!well-known) {
+    deny all;
+    return 404;
+}
+```
+- `server_tokens off` — don't advertise your exact version to attackers.
+- `client_max_body_size` — match it to your real upload needs.
+- Denying dotfiles prevents accidental exposure of `.git`, `.env`, etc.
+
+---
+
+## Worker & connection tuning
+```nginx
+worker_processes auto;             # one worker per CPU core
+events {
+    worker_connections 1024;       # connections per worker
+}
+http {
+    sendfile on;                   # efficient static file delivery
+    tcp_nopush on;
+    keepalive_timeout 65;
+}
+```
+`worker_processes auto` matches cores; the defaults are sensible — tune only with evidence
+from real load.
+
+---
+
+## Common pitfalls
+- ❌ Caching authenticated/personalized responses → users see each other's data.
+- ❌ A too-strict CSP shipped straight to prod → breaks the site. Use report-only first.
+- ❌ Rate limits so tight they block legitimate users — measure real traffic first.
+- ❌ Leaving `server_tokens on` and the default 1MB body limit unconsidered.
+
+## Best practices
+- ✅ gzip/brotli + proxy caching for cacheable content (verify with `X-Cache-Status`).
+- ✅ Rate-limit and connection-limit at the edge; keep per-user logic in the app.
+- ✅ Ship security headers; roll out CSP via report-only then enforce.
+- ✅ `server_tokens off`, sane `client_max_body_size`, block dotfiles.
+
+## Try it yourself
+1. Add proxy caching to `/api/` and confirm `curl -I` shows `X-Cache-Status: MISS` then
+   `HIT` on the second request.
+2. Add a `5r/s` rate limit and hammer the endpoint (`for i in {1..30}; do curl ...`) to see
+   `429`s.
+3. Run your site through `securityheaders.com` (or check `curl -I`) and add any missing
+   headers.
+
+➡️ Next: [Nginx with Docker & Production](./08-nginx-with-docker-and-production.mdx)

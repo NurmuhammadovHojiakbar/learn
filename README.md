@@ -9,11 +9,12 @@ The courses are designed to **interlock** — you build a Node.js app, give it a
 containerize it with Docker, and ship it automatically with CI/CD.
 
 ```
-   ┌─────────┐    ┌─────────┐    ┌─────────┐
-   │  Redis  │ ─▶ │ Docker  │ ─▶ │  CI/CD  │
-   │  cache  │    │ package │    │  ship   │
-   └─────────┘    └─────────┘    └─────────┘
-   build the app   containerize   test & deploy
+   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+   │  Redis  │ ─▶ │ Docker  │ ─▶ │  Nginx  │ ─▶ │  CI/CD  │
+   │  cache  │    │ package │    │  front  │    │  ship   │
+   └─────────┘    └─────────┘    └─────────┘    └─────────┘
+   build the app   containerize   put a front    test & deploy
+                                  door on it
 ```
 
 ---
@@ -34,6 +35,14 @@ multi-stage builds, volumes & networking, Docker Compose, security, and orchestr
 
 > Start here if you want consistent environments and deployable artifacts.
 
+### 🌐 [Nginx](./nginx/README.md) — reverse proxy & web server
+Put a fast, secure front door on your app: serving static sites, reverse-proxying and
+load-balancing a Node backend, HTTPS/TLS termination, caching, compression, and rate
+limiting — running in front of the Docker stack.
+**8 lessons + a runnable Nginx → Node → Redis stack.**
+
+> Start here once you have an app to expose safely to the internet.
+
 ### ⚙️ [CI/CD](./ci-cd/README.md) — automated testing & delivery
 Ship with confidence using GitHub Actions: workflows, build & test pipelines, matrix builds
 + service containers, secrets & environments, building/publishing Docker images, and gated
@@ -48,12 +57,15 @@ deploys with rollbacks. **8 lessons + ready-to-use workflows.**
 **Full stack-to-ship path (recommended):**
 1. **Redis** 01–05 — core data types & caching (build the app's data layer).
 2. **Docker** 01–06 — containerize the app + dependencies.
-3. **CI/CD** 01–06 — automate lint/test/build and publish the image.
-4. **CI/CD** 07–08 + **Docker** 07–08 — deploy, harden, and operate it.
-5. Circle back to **Redis** 06–11 for pub/sub, scaling, and vector search as you need them.
+3. **Nginx** 01–04 — front the app with a reverse proxy.
+4. **CI/CD** 01–06 — automate lint/test/build and publish the image.
+5. **CI/CD** 07–08 + **Docker** 07–08 + **Nginx** 05–08 — deploy, load-balance, add TLS,
+   harden, and operate it.
+6. Circle back to **Redis** 06–11 for pub/sub, scaling, and vector search as you need them.
 
 **Just need caching?** Redis 01–05 + 10 (production patterns).
 **Just need to containerize?** Docker 01–06.
+**Just need a reverse proxy / HTTPS?** Nginx 01–04 + 06.
 **Just automating an existing app?** CI/CD 01–06.
 
 ---
@@ -78,4 +90,5 @@ deploys with rollbacks. **8 lessons + ready-to-use workflows.**
 |--------|:-------:|---------------|--------------------|
 | [Redis](./redis/README.md) | 11 | Node + `node-redis` | Cache, rank, queue, pub/sub, vector-search |
 | [Docker](./docker/README.md) | 8 | Node + Redis | Containerize and run multi-service apps |
+| [Nginx](./nginx/README.md) | 8 | Nginx + Node + Redis | Reverse-proxy, load-balance, and TLS your app |
 | [CI/CD](./ci-cd/README.md) | 8 | GitHub Actions | Auto-test, build images, and deploy safely |

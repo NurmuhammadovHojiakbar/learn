@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nginx + Node + Redis</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }
+    button { font-size: 1rem; padding: .5rem 1rem; cursor: pointer; }
+    pre { background: #f4f4f5; padding: 1rem; border-radius: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Served by Nginx 🚀</h1>
+  <p>This static page is served directly by Nginx. The button calls the Node API
+     (proxied through <code>/api/</code>), which increments a counter in Redis.</p>
+  <button id="hit">Call /api/</button>
+  <pre id="out">(no response yet)</pre>
+
+  <script>
+    document.getElementById('hit').addEventListener('click', async () => {
+      const res = await fetch('/api/');
+      document.getElementById('out').textContent = JSON.stringify(await res.json(), null, 2);
+    });
+  </script>
+</body>
+</html>

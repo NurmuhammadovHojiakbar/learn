@@ -1,0 +1,130 @@
+---
+title: Introduction & Setup
+order: 1
+description: What Nginx is, the jobs it does, how to install and run it, and how a request flows through it.
+---
+
+# Introduction to Nginx
+
+## What you'll learn
+- What Nginx is and the roles it plays
+- Why you put a reverse proxy in front of an app
+- Installing and running Nginx (native + Docker)
+- How a request flows through Nginx
+
+---
+
+## What is Nginx?
+**Nginx** is a fast, lightweight server built around an **event-driven** architecture: a
+small number of worker processes handle thousands of concurrent connections without a
+thread per request. That design is why it excels at serving static content and proxying
+traffic under load.
+
+It wears several hats:
+- **Web server** — serve static files directly (HTML/CSS/JS/images).
+- **Reverse proxy** — forward requests to backend apps and relay responses.
+- **Load balancer** — distribute traffic across multiple backends.
+- **TLS terminator** — handle HTTPS at the edge.
+- **API gateway** — compression, caching, rate limiting, routing, security headers.
+
+---
+
+## Reverse proxy vs forward proxy
+- A **forward proxy** sits in front of *clients* and forwards their outbound requests
+  (e.g. a corporate proxy).
+- A **reverse proxy** sits in front of *servers* and accepts inbound requests on their
+  behalf. **Nginx is almost always used as a reverse proxy.**
+
+```
+   Forward proxy:   client ─▶ [proxy] ─▶ internet
+   Reverse proxy:   internet ─▶ [Nginx] ─▶ your app servers
+```
+
+---
+
+## Why put Nginx in front of a Node app?
+Node *can* serve HTTP directly, so why add Nginx? Because Nginx does the edge concerns far
+better, freeing your app to do business logic:
+
+| Concern | Without Nginx | With Nginx in front |
+|---------|---------------|---------------------|
+| TLS/HTTPS | App handles certs | Nginx terminates TLS |
+| Static files | App serves them (slow) | Nginx serves them directly (fast) |
+| Many app instances | Manual | Nginx load-balances them |
+| Compression, caching | In app code | Nginx, centrally |
+| Rate limiting / headers | In app code | Nginx, before traffic hits the app |
+| Slow clients | Tie up app workers | Nginx buffers them |
+
+The pattern: **Nginx at the edge, Node behind it.**
+
+---
+
+## Installing & running
+
+### Docker (recommended for this course)
+```bash
+docker run --name nginx -p 8080:80 -d nginx
+curl localhost:8080            # default "Welcome to nginx!" page
+docker logs nginx
+docker stop nginx && docker rm nginx
+```
+
+### Native
+```bash
+# Debian/Ubuntu
+sudo apt-get update && sudo apt-get install nginx
+sudo systemctl enable --now nginx
+
+# macOS
+brew install nginx && brew services start nginx
+
+# verify
+nginx -v
+curl localhost
+```
+
+---
+
+## The two commands you'll use constantly
+```bash
+nginx -t           # validate config BEFORE applying — always run this first
+nginx -s reload    # apply new config with zero downtime (graceful)
+```
+`nginx -t` catches syntax errors so a bad edit can't take your site down. `reload` swaps in
+the new config without dropping connections.
+
+---
+
+## How a request flows through Nginx
+```
+ 1. Request arrives          GET https://site.com/api/users
+ 2. Nginx matches a SERVER   (by host/port — "server_name")
+ 3. Nginx matches a LOCATION (by URL path — "/api/")
+ 4. Nginx acts on it:
+      • serve a static file        (root + try_files)
+      • OR proxy to a backend      (proxy_pass http://node)
+ 5. Response flows back (optionally gzipped, cached, with headers)
+```
+Two ideas do most of the work: **`server` blocks** (which site) and **`location` blocks**
+(which path). You'll meet both in the next lesson.
+
+---
+
+## Common pitfalls
+- ❌ Editing config and restarting without `nginx -t` first — a typo takes the site down.
+- ❌ Forgetting to `reload` after editing — changes don't apply until you do.
+- ❌ Exposing a bare Node process to the internet (no TLS, no buffering) instead of fronting
+  it with Nginx.
+- ❌ Confusing reverse proxy (in front of servers) with forward proxy (in front of clients).
+
+## Best practices
+- ✅ Always `nginx -t` before `nginx -s reload`.
+- ✅ Let Nginx own TLS, static files, compression, and rate limiting.
+- ✅ Keep the app focused on application logic behind the proxy.
+
+## Try it yourself
+1. Run Nginx in Docker and open http://localhost:8080.
+2. `docker exec -it nginx cat /etc/nginx/nginx.conf` — skim the default config.
+3. `docker exec -it nginx nginx -t` — see the "syntax is ok / test is successful" output.
+
+➡️ Next: [Configuration Basics](./02-configuration-basics.mdx)

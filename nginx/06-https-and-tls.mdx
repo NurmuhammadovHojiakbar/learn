@@ -1,0 +1,142 @@
+---
+title: HTTPS & TLS
+order: 6
+description: Terminate TLS at Nginx — get free certificates with Let's Encrypt, redirect HTTP to HTTPS, and apply a modern, secure TLS configuration.
+---
+
+# HTTPS & TLS
+
+## What you'll learn
+- What **TLS termination** at the proxy means
+- Getting free, auto-renewing certificates with **Let's Encrypt**
+- Redirecting all HTTP traffic to HTTPS
+- A modern, secure TLS config (HSTS, protocols, ciphers)
+
+HTTPS is mandatory in production. The standard approach: **Nginx terminates TLS** at the
+edge and talks plain HTTP to your backend on the private network.
+
+```
+ Client ──HTTPS(:443)──▶ Nginx ──HTTP(:3000)──▶ Node app
+         encrypted              private network
+```
+
+---
+
+## A TLS server block
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;                          # enable HTTP/2 (faster multiplexing)
+    server_name example.com;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;   # cert + chain
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;     # private key
+
+    location / {
+        proxy_pass http://node_backend;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;       # tells the app it's HTTPS
+    }
+}
+```
+
+---
+
+## Redirect HTTP → HTTPS
+Keep a port-80 server whose only job is to redirect everything to HTTPS:
+```nginx
+server {
+    listen 80;
+    server_name example.com www.example.com;
+    return 301 https://$host$request_uri;   # permanent redirect to HTTPS
+}
+```
+`return 301` is cheaper and clearer than a rewrite. After this, no plaintext traffic
+reaches your app.
+
+---
+
+## Free certificates with Let's Encrypt
+**Let's Encrypt** issues free, trusted, 90-day certificates that auto-renew. The usual tool
+is **certbot**.
+
+### Option A: certbot manages Nginx for you
+```bash
+sudo apt-get install certbot python3-certbot-nginx
+sudo certbot --nginx -d example.com -d www.example.com
+# certbot edits your server blocks, installs the cert, and sets up auto-renewal
+```
+
+### Option B: webroot (you keep control of the config)
+```bash
+# Nginx must serve the ACME challenge path over HTTP:
+#   location /.well-known/acme-challenge/ { root /var/www/certbot; }
+sudo certbot certonly --webroot -w /var/www/certbot -d example.com
+```
+
+### Renewal
+Certbot installs a timer that renews automatically. Test it:
+```bash
+sudo certbot renew --dry-run
+```
+> In containers, the popular **nginx + certbot** pattern uses a shared volume for certs and
+> a sidecar that renews them; or use **Caddy**/**Traefik** which automate TLS entirely.
+
+---
+
+## A modern, secure TLS config
+Drop these into the `http` (or server) context for strong defaults:
+```nginx
+ssl_protocols TLSv1.2 TLSv1.3;             # disable old, insecure protocols
+ssl_prefer_server_ciphers off;             # let modern clients choose (TLS 1.3)
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384;
+ssl_session_cache shared:SSL:10m;          # reuse sessions (faster handshakes)
+ssl_session_timeout 1d;
+ssl_stapling on;                           # OCSP stapling
+ssl_stapling_verify on;
+
+# HSTS — force browsers to always use HTTPS for this domain
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+```
+- **TLS 1.2 + 1.3 only** — 1.0/1.1 are deprecated and insecure.
+- **HSTS** — after the first visit, browsers refuse to use HTTP for your domain. Start with
+  a smaller `max-age` while testing, and only add `preload` when you're certain.
+
+> Use Mozilla's [SSL Configuration Generator](https://ssl-config.mozilla.org/) to get an
+> up-to-date config for your Nginx version, and test the result with **SSL Labs**.
+
+---
+
+## Self-signed certs for local dev
+For local HTTPS testing (browsers will warn — that's expected):
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout privkey.pem -out fullchain.pem -subj "/CN=localhost"
+```
+Use [`mkcert`](https://github.com/FiloSottile/mkcert) for locally-trusted dev certs without
+warnings.
+
+---
+
+## Common pitfalls
+- ❌ Pointing `ssl_certificate` at the leaf cert only — use **fullchain** (cert + intermediates)
+  or some clients fail to verify.
+- ❌ Forgetting `X-Forwarded-Proto $scheme` → the app builds `http://` links/redirects.
+- ❌ Enabling HSTS with a long `max-age`/`preload` before you're sure HTTPS works everywhere
+  — it's hard to undo.
+- ❌ Leaving TLS 1.0/1.1 enabled.
+- ❌ Letting certs expire — ensure auto-renewal actually runs.
+
+## Best practices
+- ✅ Terminate TLS at Nginx; HTTP to the backend on a private network.
+- ✅ Redirect all HTTP → HTTPS with `return 301`.
+- ✅ Let's Encrypt + auto-renewal; verify with `certbot renew --dry-run`.
+- ✅ TLS 1.2/1.3, OCSP stapling, HSTS, HTTP/2 — generate via Mozilla's tool, test on SSL Labs.
+
+## Try it yourself
+1. Generate a self-signed cert and serve the example app over `https://localhost` (accept
+   the browser warning).
+2. Add the port-80 → 443 redirect and confirm `curl -I http://localhost` returns `301`.
+3. Run an SSL Labs (or `testssl.sh`) scan against a public deployment and aim for an A.
+
+➡️ Next: [Performance & Security](./07-performance-and-security.mdx)

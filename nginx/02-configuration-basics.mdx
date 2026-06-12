@@ -1,0 +1,184 @@
+---
+title: Configuration Basics
+order: 2
+description: How nginx.conf is structured — contexts, directives, server and location blocks, includes, and reloading safely.
+---
+
+# Nginx Configuration Basics
+
+## What you'll learn
+- The structure of `nginx.conf`: **contexts** and **directives**
+- `server` blocks (virtual hosts) and `location` blocks (path routing)
+- How `location` matching priority works
+- Organizing config with `include`, and reloading safely
+
+---
+
+## Directives and contexts
+An Nginx config is made of **directives** (settings) organized into **contexts** (blocks
+wrapped in `{ }`). Directives end with `;`.
+
+```nginx
+# main context (top level)
+worker_processes auto;
+
+events {                       # events context
+    worker_connections 1024;
+}
+
+http {                         # http context — almost everything web-related lives here
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+
+    server {                   # server context — one virtual host
+        listen      80;
+        server_name example.com;
+
+        location / {           # location context — routing by URL path
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+    }
+}
+```
+
+The nesting that matters most:
+```
+http { }            ← global web settings, gzip, log formats, upstreams
+  └─ server { }     ← a site: which port + hostname it answers
+       └─ location { }  ← what to do for a given URL path
+```
+
+---
+
+## `server` blocks (virtual hosts)
+A `server` block defines one site. Nginx picks which one handles a request using `listen`
+(port) and `server_name` (hostname), so one Nginx can host many sites:
+
+```nginx
+server {
+    listen 80;
+    server_name example.com www.example.com;
+    # ...
+}
+
+server {
+    listen 80;
+    server_name api.example.com;
+    # ...
+}
+```
+
+`server_name` accepts exact names, wildcards (`*.example.com`), and `_` as a catch-all.
+
+---
+
+## `location` blocks (path routing)
+A `location` decides what happens for a URL path:
+
+```nginx
+location / {
+    root /var/www/html;        # serve files from disk
+}
+
+location /api/ {
+    proxy_pass http://localhost:3000;   # forward to a backend
+}
+
+location /images/ {
+    root /var/www;             # /images/x.png -> /var/www/images/x.png
+    expires 30d;               # cache headers
+}
+```
+
+### Location matching priority (important!)
+When several locations could match, Nginx uses **priority, not file order**:
+
+| Modifier | Example | Meaning | Priority |
+|----------|---------|---------|----------|
+| `=` | `location = /health` | **Exact** match | Highest |
+| `^~` | `location ^~ /assets/` | Prefix, stop searching regex | High |
+| `~` / `~*` | `location ~* \.(jpg|png)$` | Regex (case-sensitive / insensitive) | Medium |
+| (none) | `location /api/` | Prefix match | Lowest |
+
+```nginx
+location = / { ... }            # only the exact "/"
+location ^~ /static/ { ... }    # anything under /static/, skip regex checks
+location ~* \.(css|js)$ { ... } # any .css/.js by regex
+location / { ... }              # everything else (fallback)
+```
+> Rule of thumb: use `=` for hot exact paths (like `/health`), `^~` for static asset
+> prefixes, regex for file-type rules, and a plain `/` as the catch-all.
+
+---
+
+## `root` vs `alias`
+```nginx
+location /static/ {
+    root /var/www;      # request /static/a.js -> /var/www/static/a.js  (path appended)
+}
+location /static/ {
+    alias /var/www/assets/;  # request /static/a.js -> /var/www/assets/a.js  (path replaced)
+}
+```
+`root` **appends** the URI to the path; `alias` **replaces** the matched location prefix. A
+common source of 404s — pick deliberately.
+
+---
+
+## Organizing config with `include`
+Real setups split config into files instead of one giant `nginx.conf`:
+```nginx
+http {
+    include /etc/nginx/conf.d/*.conf;       # drop-in site files
+    # (Debian also uses) include /etc/nginx/sites-enabled/*;
+}
+```
+Put each site in its own `conf.d/site.conf`. This is how the [examples](./examples) are
+organized.
+
+---
+
+## Variables
+Nginx exposes built-in variables (prefixed `$`) you'll use in proxying, logging, and
+redirects:
+```nginx
+$host            # the Host header
+$remote_addr     # client IP
+$request_uri     # full original URI
+$scheme          # http or https
+$uri             # normalized URI
+```
+
+---
+
+## Reload safely
+```nginx
+nginx -t            # 1. validate — "syntax is ok / test is successful"
+nginx -s reload     # 2. apply with zero downtime
+```
+Workers finish in-flight requests on the old config, new requests use the new one. Never
+skip step 1.
+
+---
+
+## Common pitfalls
+- ❌ Assuming `location` blocks match in file order — they match by **priority**.
+- ❌ Mixing up `root` and `alias` → wrong file paths / 404s.
+- ❌ Forgetting the trailing `;` on a directive → config won't load.
+- ❌ Reloading without `nginx -t` → a typo brings the site down.
+
+## Best practices
+- ✅ One `server` block per site, in its own `conf.d/*.conf` file.
+- ✅ Use `=` for exact hot paths and `^~` for static prefixes.
+- ✅ Always `nginx -t` before reloading.
+- ✅ Prefer `include` over one monolithic config.
+
+## Try it yourself
+1. In a Docker Nginx, replace the default site with a `server` block that has
+   `location = /health { return 200 "ok\n"; }` and a fallback `location /`.
+2. `curl localhost:8080/health` → `ok`; `curl localhost:8080/anything` → the page.
+3. Introduce a deliberate typo, run `nginx -t`, and watch it report the exact line.
+
+➡️ Next: [Serving Static Sites](./03-serving-static-sites.mdx)

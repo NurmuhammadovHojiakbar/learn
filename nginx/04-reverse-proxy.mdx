@@ -1,0 +1,172 @@
+---
+title: Reverse Proxy
+order: 4
+description: Forward requests to a Node.js backend with proxy_pass — passing the right headers, handling WebSockets, timeouts, and serving static + API from one host.
+---
+
+# Reverse Proxying a Node App
+
+## What you'll learn
+- Forwarding requests to a backend with `proxy_pass`
+- The **headers** you must pass (and why)
+- Proxying **WebSockets**
+- Serving static files and an API from the **same** host
+- Timeouts and buffering
+
+This is the core production pattern: **Nginx at the edge, Node behind it.**
+
+---
+
+## The simplest reverse proxy
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://localhost:3000;   # forward everything to the Node app
+    }
+}
+```
+Now requests to Nginx on port 80 are forwarded to Node on port 3000, and responses flow
+back. But as-is, your app loses information about the original request — fix that with
+headers.
+
+---
+
+## Pass the right headers
+By default the backend sees Nginx as the client (`127.0.0.1`) and loses the original host
+and protocol. Forward them explicitly:
+
+```nginx
+location / {
+    proxy_pass http://localhost:3000;
+
+    proxy_set_header Host              $host;             # original Host
+    proxy_set_header X-Real-IP         $remote_addr;      # client IP
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;           # http or https
+}
+```
+
+Why each matters:
+- **`Host`** — many apps route/build URLs based on the host.
+- **`X-Real-IP` / `X-Forwarded-For`** — without these, every client looks like `127.0.0.1`
+  to your app (breaks logging, rate limiting, geo).
+- **`X-Forwarded-Proto`** — tells the app the user came over HTTPS (so it builds `https://`
+  links even though Nginx→Node is plain HTTP).
+
+> In Express, set `app.set('trust proxy', true)` so `req.ip` and `req.protocol` honor these
+> headers.
+
+---
+
+## WebSockets
+WebSockets need an HTTP **Upgrade** handshake, which requires two extra headers and
+HTTP/1.1:
+```nginx
+location /ws/ {
+    proxy_pass http://localhost:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host       $host;
+}
+```
+Without these, WebSocket (and Socket.IO) connections fail to establish.
+
+---
+
+## Static files + API on one host
+A very common layout: Nginx serves the built frontend directly and proxies only `/api` to
+Node. The frontend is fast (served from disk) and the API is proxied.
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+    root /var/www/app;            # built SPA
+
+    # API → Node backend
+    location /api/ {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Everything else → static SPA with client-side routing fallback
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+### `proxy_pass` and trailing slashes (a classic gotcha)
+```nginx
+location /api/ {
+    proxy_pass http://localhost:3000/;   # WITH trailing slash: /api/users -> /users
+}
+location /api/ {
+    proxy_pass http://localhost:3000;    # WITHOUT: /api/users -> /api/users
+}
+```
+A trailing slash on `proxy_pass` **strips** the matched location prefix; no slash
+**keeps** it. Decide based on whether your Node routes are mounted under `/api` or not.
+
+---
+
+## Timeouts & buffering
+```nginx
+location / {
+    proxy_pass http://localhost:3000;
+    proxy_connect_timeout 5s;     # time to connect to the backend
+    proxy_read_timeout    60s;    # time to wait for a response (raise for long jobs/SSE)
+    proxy_buffering on;           # buffer the response (good for slow clients)
+}
+```
+For Server-Sent Events / streaming, you often want `proxy_buffering off;` on that location
+so events flush immediately.
+
+---
+
+## Naming the backend with `upstream`
+Instead of hardcoding the address, define a named upstream — this is also the door to load
+balancing (next lesson):
+```nginx
+upstream node_app {
+    server 127.0.0.1:3000;
+}
+
+server {
+    location /api/ {
+        proxy_pass http://node_app;
+    }
+}
+```
+
+---
+
+## Common pitfalls
+- ❌ Not forwarding `X-Forwarded-*` → app sees every client as `127.0.0.1`, wrong protocol.
+- ❌ Forgetting the WebSocket `Upgrade`/`Connection` headers → WS connections fail.
+- ❌ Trailing-slash mismatch on `proxy_pass` → routes 404 or double-prefixed.
+- ❌ Forgetting `app.set('trust proxy', true)` in Express → `req.ip`/`req.secure` wrong.
+- ❌ Default `proxy_read_timeout` too low for long-running requests.
+
+## Best practices
+- ✅ Always forward `Host`, `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`.
+- ✅ Use a named `upstream` so you can scale later.
+- ✅ Add the WebSocket headers on WS locations.
+- ✅ Serve static assets from Nginx; proxy only the API.
+
+## Try it yourself
+1. Run the [Docker example Node app](../docker/examples) on :3000 and put Nginx in front
+   proxying `/api/` to it; confirm `curl localhost:8080/api/` reaches the app.
+2. Log `req.ip` in the app — verify it shows your real client IP only after you add the
+   `X-Forwarded-For` header and `trust proxy`.
+3. Change `proxy_pass` to add/remove the trailing slash and observe how the backend path
+   changes.
+
+➡️ Next: [Load Balancing](./05-load-balancing.mdx)

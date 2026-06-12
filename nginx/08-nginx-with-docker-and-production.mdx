@@ -1,0 +1,186 @@
+---
+title: Nginx with Docker & Production
+order: 8
+description: Run Nginx in containers as the front door to a Node + Redis stack — Compose wiring, config mounting, custom images, and production operations.
+---
+
+# Nginx with Docker & in Production
+
+## What you'll learn
+- Running Nginx as a container with your config
+- Putting Nginx in front of the **Node + Redis** stack with Docker Compose
+- Building a custom Nginx image (static frontend + proxy)
+- Production operations: logs, reloads, zero-downtime, and alternatives
+
+This brings the whole library together: the [Docker](../docker/README.md) Node + Redis app,
+fronted by Nginx, ready for the [CI/CD](../ci-cd/README.md) pipeline to ship.
+
+---
+
+## Running Nginx in a container with your config
+Mount a config file into the official image:
+```bash
+docker run --name nginx -p 8080:80 \
+  -v "$(pwd)/conf.d/default.conf":/etc/nginx/conf.d/default.conf:ro \
+  -v "$(pwd)/html":/usr/share/nginx/html:ro \
+  -d nginx
+```
+- `/etc/nginx/conf.d/*.conf` are included automatically by the default `nginx.conf`.
+- `:ro` mounts read-only — Nginx never needs to write its config.
+
+---
+
+## The full stack with Docker Compose
+Nginx as the edge, proxying to the Node app, which uses Redis:
+```yaml
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro      # your site config(s)
+      - ./html:/usr/share/nginx/html:ro    # static frontend (optional)
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    build: ./node-app
+    environment:
+      REDIS_URL: redis://redis:6379
+    expose:
+      - "3000"                              # internal only — Nginx reaches it, host doesn't
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
+```
+
+The matching `conf.d/default.conf` uses the **service name** `api` as the upstream host:
+```nginx
+upstream api {
+    server api:3000;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    location /api/ {
+        proxy_pass http://api;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;     # SPA fallback
+    }
+}
+```
+> Note `api` uses `expose` (not `ports`) — only Nginx can reach it, over Compose's internal
+> network. The app is never exposed to the host directly. That's the production shape.
+
+Run it:
+```bash
+docker compose up -d
+curl localhost/            # the static frontend
+curl localhost/api/        # proxied to the Node app (which talks to Redis)
+```
+
+This is the runnable [`examples/`](./examples) stack.
+
+---
+
+## Building a custom Nginx image
+For immutable deploys, bake the built frontend and config **into** an image instead of
+mounting them (great with CI/CD):
+```dockerfile
+FROM nginx:1.27-alpine
+COPY conf.d/default.conf /etc/nginx/conf.d/default.conf
+COPY html/ /usr/share/nginx/html/
+# the base image already runs: nginx -g "daemon off;"
+```
+A common multi-stage pattern builds the frontend in a Node stage, then copies the static
+output into the Nginx stage:
+```dockerfile
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build              # produces /app/dist
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY conf.d/default.conf /etc/nginx/conf.d/default.conf
+```
+
+---
+
+## Production operations
+- **Reload without downtime:** `docker exec nginx nginx -s reload` after updating mounted
+  config (validate first: `docker exec nginx nginx -t`).
+- **Logs:** the official image sends access/error logs to stdout/stderr, so
+  `docker logs nginx` and your log pipeline just work.
+- **Run as non-root / read-only:** use `nginx-unprivileged` or set a non-root user; mount
+  config `:ro`.
+- **Pin the version:** `nginx:1.27-alpine`, not `nginx:latest`.
+- **Health:** add a `location = /healthz { return 200; }` for orchestrator probes.
+
+---
+
+## When to use something else
+Nginx is the workhorse, but alternatives automate parts of this:
+| Tool | Strength |
+|------|----------|
+| **Nginx** | Battle-tested, ultra-fast, full control |
+| **Caddy** | Automatic HTTPS (Let's Encrypt) out of the box, simple config |
+| **Traefik** | Auto-discovers containers/labels; great for dynamic Docker/K8s |
+| **Cloud LB / Ingress** | On AWS/GCP/K8s, the platform often provides the edge LB + TLS |
+
+For a single VPS, Nginx (or Caddy for effortless TLS) is ideal. On Kubernetes, an **Ingress
+controller** (often Nginx-based) plays this role.
+
+---
+
+## Common pitfalls
+- ❌ Publishing the app's port to the host instead of `expose` → bypasses Nginx entirely.
+- ❌ Using `localhost` in the Nginx config to reach the app — use the **service name**.
+- ❌ `nginx:latest` and mounting config read-write.
+- ❌ Reloading without `nginx -t` inside the container.
+
+## Best practices
+- ✅ Nginx is the only service with published ports; backends use `expose`.
+- ✅ Reference backends by Compose/K8s service name in `upstream`.
+- ✅ Bake config + built frontend into an image for immutable, CI/CD-friendly deploys.
+- ✅ Pin versions, run non-root, mount config `:ro`, add a health endpoint.
+
+## Try it yourself
+1. Run the [`examples/`](./examples) Compose stack; confirm `localhost/` serves static and
+   `localhost/api/` is proxied to the Node app, which increments a Redis counter.
+2. Edit the proxy config, run `docker exec nginx nginx -t` then `nginx -s reload`, and see
+   the change apply with no downtime.
+3. Build the custom Nginx image and run it standalone (no mounted volumes) to confirm the
+   config and frontend are baked in.
+
+🎉 **You've completed the Nginx course.** You can now put a fast, secure front door on any
+app — routing, TLS, load balancing, caching, and rate limiting — and run it in production
+alongside the [Docker](../docker/README.md), [Redis](../redis/README.md), and
+[CI/CD](../ci-cd/README.md) courses.

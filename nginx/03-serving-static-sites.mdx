@@ -1,0 +1,139 @@
+---
+title: Serving Static Sites
+order: 3
+description: Use Nginx as a fast static web server — root and index, try_files, SPA routing, cache headers, and compression.
+---
+
+# Serving Static Sites
+
+## What you'll learn
+- Serving files with `root` and `index`
+- `try_files` and the **SPA fallback** pattern
+- Cache headers for static assets
+- Custom error pages and basic compression
+
+Serving static files is what Nginx does best — directly from disk, far faster than a Node
+process.
+
+---
+
+## A minimal static site
+```nginx
+server {
+    listen 80;
+    server_name _;                     # catch-all
+
+    root /usr/share/nginx/html;        # where files live
+    index index.html;                  # default file for a directory
+
+    location / {
+        try_files $uri $uri/ =404;     # see below
+    }
+}
+```
+Put `index.html` in `/usr/share/nginx/html` and it's served at `/`.
+
+---
+
+## `try_files` — the workhorse
+`try_files` tries each argument in order and uses the first that exists; the last argument
+is the fallback.
+
+```nginx
+try_files $uri $uri/ =404;
+#         │     │     └─ if nothing matched, return 404
+#         │     └─ try it as a directory (serve its index)
+#         └─ try the exact file on disk
+```
+
+### Single-Page App (SPA) fallback
+React/Vue/Angular apps do client-side routing, so `/dashboard` has no file on disk — the
+server must return `index.html` and let the JS router take over:
+```nginx
+location / {
+    try_files $uri $uri/ /index.html;   # fall back to the app shell
+}
+```
+This one line is the key to hosting any SPA on Nginx.
+
+---
+
+## Cache headers for assets
+Static assets (hashed JS/CSS, images) can be cached aggressively by browsers/CDNs. Use
+`expires` and `Cache-Control`:
+```nginx
+# Long-cache fingerprinted assets (app.abc123.js)
+location ~* \.(?:js|css|woff2|png|jpg|jpeg|gif|svg|ico)$ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+    access_log off;
+}
+
+# Never cache the HTML entry point, so new deploys are picked up
+location = /index.html {
+    expires -1;
+    add_header Cache-Control "no-cache";
+}
+```
+> The pattern: **cache fingerprinted assets forever, never cache `index.html`.** A new
+> deploy changes the asset filenames, so clients fetch the new ones while old HTML is never
+> stale.
+
+---
+
+## Compression (gzip)
+Compress text responses to cut transfer size dramatically:
+```nginx
+gzip on;
+gzip_vary on;                          # vary on Accept-Encoding
+gzip_min_length 1024;                  # don't bother with tiny files
+gzip_types text/plain text/css application/json application/javascript
+           text/xml application/xml image/svg+xml;
+```
+(Images/video are already compressed — don't gzip them.) Brotli is even better but needs a
+module; gzip is built in and a big win on its own.
+
+---
+
+## Custom error pages
+```nginx
+error_page 404 /404.html;
+error_page 500 502 503 504 /50x.html;
+
+location = /404.html { root /usr/share/nginx/html; internal; }
+location = /50x.html { root /usr/share/nginx/html; internal; }
+```
+`internal` means the page can only be served as an error response, not requested directly.
+
+---
+
+## Directory listing (usually off)
+```nginx
+autoindex off;     # default — don't expose a file listing
+```
+Leave this off in production unless you specifically want a browsable file index.
+
+---
+
+## Common pitfalls
+- ❌ SPA returns 404 on refresh of a sub-route → missing the `try_files ... /index.html`
+  fallback.
+- ❌ Caching `index.html` forever → users stuck on an old app after deploys.
+- ❌ `root` vs `alias` confusion → files not found (see [Lesson 02](./02-configuration-basics.mdx)).
+- ❌ gzip-ing already-compressed files (images, video) → wasted CPU, no benefit.
+
+## Best practices
+- ✅ `try_files $uri $uri/ /index.html;` for SPAs.
+- ✅ Long-cache fingerprinted assets (`immutable`), no-cache the HTML shell.
+- ✅ Enable gzip for text/JSON/JS/CSS.
+- ✅ Turn `access_log off` for static assets to cut log noise.
+
+## Try it yourself
+1. Serve an `index.html` plus an `app.css` from Nginx; confirm the CSS gets a 1-year
+   `Cache-Control` and the HTML gets `no-cache` (check with `curl -I`).
+2. Add the SPA fallback and confirm `curl localhost:8080/some/deep/route` returns the HTML
+   shell, not a 404.
+3. Enable gzip and verify with `curl -H "Accept-Encoding: gzip" -I localhost:8080/app.css`
+   showing `Content-Encoding: gzip`.
+
+➡️ Next: [Reverse Proxy](./04-reverse-proxy.mdx)
