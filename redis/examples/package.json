@@ -7,7 +7,8 @@
     "cache": "node cache-aside.js",
     "ratelimit": "node rate-limiter.js",
     "session": "node session-express.js",
-    "pubsub": "node pubsub.js"
+    "pubsub": "node pubsub.js",
+    "vector": "node vector-search.js"
   },
   "dependencies": {
     "redis": "^4.7.0",
